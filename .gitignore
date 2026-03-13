@@ -1,0 +1,21 @@
+# Secret credentials — NEVER upload
+.env
+
+# Python virtual environment — too large, not needed
+venv/
+
+# Compiled Python files — auto-generated
+__pycache__/
+*.pyc
+
+# Trained ML models — too large
+models/*.pkl
+
+# Log files — personal data
+logs/
+
+# Historical data cache — too large
+data/historical/
+
+# Generated reports
+reports/
