@@ -284,6 +284,81 @@ def _add_candle_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ENHANCED ML FEATURES (volatility regime, market context, momentum)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _add_enhanced_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Additional features to improve ML accuracy beyond random:
+      - Volatility regime (ATR ratio)
+      - Market session (categorical)
+      - Day of week (raw)
+      - Price vs VWAP
+      - Consecutive candle direction
+      - Distance from 20-day high/low
+      - Volume vs 20-period average
+    """
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    vol = df["volume"]
+
+    # ── 1. ATR ratio: current volatility vs recent average ──────────────
+    # Tells the model if we're in a high/low volatility regime
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr_14 = tr.ewm(alpha=1 / 14, adjust=False).mean()
+    atr_20 = tr.rolling(20).mean()
+    df["atr_ratio"] = atr_14 / atr_20.replace(0, np.nan)
+
+    # ── 2. Market session as single categorical feature ─────────────────
+    # Asia=0, London=1, NY=2, London-NY overlap=3
+    h = df.index.hour
+    london = (h >= Config.LONDON_OPEN_UTC) & (h < Config.LONDON_CLOSE_UTC)
+    ny = (h >= Config.NEW_YORK_OPEN_UTC) & (h < Config.NEW_YORK_CLOSE_UTC)
+    overlap = london & ny
+    df["session_cat"] = np.where(
+        overlap, 3,
+        np.where(ny, 2, np.where(london, 1, 0))
+    )
+
+    # ── 3. Day of week (0=Mon, 4=Fri) ──────────────────────────────────
+    df["day_of_week"] = df.index.dayofweek.astype(float)
+
+    # ── 4. Price vs VWAP ───────────────────────────────────────────────
+    # VWAP proxy: rolling volume-weighted average price
+    typical = (high + low + close) / 3
+    cum_tp_vol = (typical * vol).rolling(20).sum()
+    cum_vol = vol.rolling(20).sum().replace(0, np.nan)
+    vwap = cum_tp_vol / cum_vol
+    df["price_vs_vwap"] = (close - vwap) / vwap.replace(0, np.nan) * 100
+
+    # ── 5. Consecutive candle direction count ───────────────────────────
+    # How many candles in a row have been bullish/bearish
+    bullish = (close > df["open"]).astype(int)
+    # Count consecutive same-direction candles
+    groups = (bullish != bullish.shift(1)).cumsum()
+    streak = bullish.groupby(groups).cumcount() + 1
+    # Positive for bullish streaks, negative for bearish
+    df["candle_streak"] = np.where(bullish == 1, streak, -streak).astype(float)
+
+    # ── 6. Distance from 20-day high/low as percentage ──────────────────
+    rolling_h20 = high.rolling(20 * 4).max()  # ~20 trading periods
+    rolling_l20 = low.rolling(20 * 4).min()
+    df["dist_20d_high_pct"] = (rolling_h20 - close) / close * 100
+    df["dist_20d_low_pct"] = (close - rolling_l20) / close * 100
+
+    # ── 7. Volume vs 20-period average ratio ────────────────────────────
+    vol_ma20 = vol.rolling(20).mean().replace(0, np.nan)
+    df["vol_ratio_20"] = vol / vol_ma20
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TARGET VARIABLE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -357,6 +432,7 @@ def build_features(
     feat = _add_time_features(feat)
     feat = _add_sr_features(feat)
     feat = _add_candle_features(feat)
+    feat = _add_enhanced_features(feat)
 
     if include_target:
         feat = _add_target(feat)

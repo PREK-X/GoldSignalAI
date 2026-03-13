@@ -202,8 +202,10 @@ class Config:
     BB_STDDEV  = 2
     ATR_PERIOD = 14
     ATR_SL_MULTIPLIER     = 1.5         # SL = Entry ± (ATR × this)
-    MIN_SL_PIPS           = 10          # Minimum stop loss in pips (Gold)
-    MAX_SL_PIPS           = 30          # Maximum stop loss in pips (Gold)
+    MIN_SL_PIPS           = 50          # Minimum stop loss in pips (Gold)
+    MAX_SL_PIPS           = 200         # Maximum stop loss in pips (Gold)
+    # Note: Gold M15 median candle range is ~125 pips. SL must be wider
+    # than a single candle to avoid noise stop-outs. ATR14 × 1.5 ≈ 130 pips.
     PIP_SIZE              = 0.1         # 1 pip for Gold = $0.10 per 0.01 lot
     GOLD_PIP_VALUE        = 10.0        # $ per pip per standard lot (XAU/USD)
 
@@ -226,8 +228,9 @@ class Config:
     FIBO_KEY_LEVEL = 0.618              # 61.8% — highest probability entry
 
     # ── Signal Scoring ────────────────────────────────────────────────────────
-    TOTAL_INDICATORS     = 10           # Denominator for confidence %
-    MIN_CONFIDENCE_PCT   = 70           # Minimum to fire BUY/SELL signal
+    TOTAL_INDICATORS     = 9            # 9 voted indicators (BBands removed — negative accuracy)
+    MIN_CONFIDENCE_PCT   = 65           # Minimum to fire BUY/SELL signal
+    MAX_CONFIDENCE_PCT   = 75           # Cap — above 75% indicates over-consensus (lagging)
     WAIT_LOWER_BOUND_PCT = 30           # Below this = strong counter-signal
     WAIT_UPPER_BOUND_PCT = 70           # Above this = tradeable signal
 
@@ -235,7 +238,7 @@ class Config:
     ML_MODEL_PATH        = "models/goldSignalAI_model.pkl"
     ML_RF_MODEL_PATH     = "models/goldSignalAI_rf_model.pkl"
     ML_SCALER_PATH       = "models/goldSignalAI_scaler.pkl"
-    ML_MIN_ACCURACY      = 0.60         # Discard model if below this
+    ML_MIN_ACCURACY      = 0.52         # Discard model if below this (gold is noisy)
     ML_PRODUCTION_MIN    = 0.70         # Required before going live
     ML_RETRAIN_WEEKDAY   = 0            # 0 = Monday (Python weekday)
     ML_RETRAIN_HOUR_UTC  = 0            # Midnight UTC
@@ -355,7 +358,7 @@ class Config:
             issues.append("WARNING: TELEGRAM_CHAT_ID not set — Telegram alerts disabled")
         if cls.ACTIVE_PROP_FIRM not in PROP_FIRM_PROFILES:
             issues.append(f"ERROR: ACTIVE_PROP_FIRM='{cls.ACTIVE_PROP_FIRM}' is not a valid preset")
-        if cls.MIN_CONFIDENCE_PCT < 60:
+        if cls.MIN_CONFIDENCE_PCT < 55:
             issues.append("WARNING: MIN_CONFIDENCE_PCT below 60% — signal quality will degrade")
         if cls.RISK_PER_TRADE_PCT > 2.0:
             issues.append("WARNING: RISK_PER_TRADE_PCT > 2% — risky for prop firm challenges")

@@ -67,6 +67,11 @@ class BacktestConfig:
     lookback_candles: int = Config.LOOKBACK_CANDLES  # analysis window per bar
     min_candles: int = Config.MIN_CANDLES_FOR_SIGNAL
 
+    # Timeframe selection
+    # "M15" = 60-day backtest (yfinance hard limit for 15m data)
+    # "H1"  = up to 2-year backtest (yfinance allows 730 days of 1h data)
+    data_timeframe: str = "M15"
+
     # Costs & slippage
     spread_pips: float = 3.0        # Gold spread simulation (typical retail)
     slippage_pips: float = 0.5      # Entry slippage simulation
@@ -89,6 +94,18 @@ class BacktestConfig:
 
     # H1 data: how many M15 bars to aggregate for H1 analysis
     h1_resample_bars: int = 4  # 4 × M15 = 1 H1 candle
+
+    # Confidence threshold — matches live trading at 65%.
+    min_confidence_pct: float = Config.MIN_CONFIDENCE_PCT
+
+    # ML integration: train models on available data and use for filtering.
+    use_ml: bool = True
+
+    # Limit order entry at S/R levels
+    use_limit_orders: bool = True
+    limit_max_distance_pips: float = 50.0  # max distance from current price to S/R
+    limit_sl_pips: float = 60.0            # tighter SL when entering at S/R
+    limit_expiry_bars: int = 8             # cancel pending order after N bars (2 hours)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -313,16 +330,29 @@ def _resample_to_h1(m15_df: pd.DataFrame) -> pd.DataFrame:
 # SINGLE-BAR ANALYSIS (stripped-down for speed)
 # ─────────────────────────────────────────────────────────────────────────────
 
+class _AnalysisResult:
+    """Bundle of analysis outputs for a single bar."""
+    __slots__ = ("direction", "confidence", "risk", "bull_count", "bear_count", "sr_levels", "current_price")
+
+    def __init__(self, direction, confidence, risk, bull_count, bear_count, sr_levels=None, current_price=0.0):
+        self.direction = direction
+        self.confidence = confidence
+        self.risk = risk
+        self.bull_count = bull_count
+        self.bear_count = bear_count
+        self.sr_levels = sr_levels
+        self.current_price = current_price
+
+
 def _analyse_bar(
     m15_slice: pd.DataFrame,
     h1_slice: pd.DataFrame,
-) -> tuple[Optional[str], float, Optional[RiskParameters], int, int]:
+    bar_time: Optional[datetime] = None,
+) -> _AnalysisResult:
     """
     Run the full analysis pipeline on a single bar's lookback window.
 
-    Returns:
-        (direction, confidence_pct, risk_params, bullish_count, bearish_count)
-        direction is None if analysis fails.
+    Returns _AnalysisResult with direction, confidence, risk, counts, and S/R levels.
     """
     try:
         # ── M15 analysis ────────────────────────────────────────────────
@@ -330,14 +360,15 @@ def _analyse_bar(
         m15_sr = detect_sr_levels(m15_slice)
         m15_fib = calculate_fibonacci(m15_slice)
         m15_cand = detect_patterns(m15_slice)
-        m15_score = score_signal(m15_ind, m15_sr, m15_fib, m15_cand)
+        # Pass bar_time for session gate (applied on M15 score only — it's the signal TF)
+        m15_score = score_signal(m15_ind, m15_sr, m15_fib, m15_cand, bar_time=bar_time)
 
         # ── H1 analysis ────────────────────────────────────────────────
         h1_ind = calculate_all(h1_slice)
         h1_sr = detect_sr_levels(h1_slice)
         h1_fib = calculate_fibonacci(h1_slice)
         h1_cand = detect_patterns(h1_slice)
-        h1_score = score_signal(h1_ind, h1_sr, h1_fib, h1_cand)
+        h1_score = score_signal(h1_ind, h1_sr, h1_fib, h1_cand)  # no session gate on H1
 
         # ── Multi-timeframe agreement ──────────────────────────────────
         m15_dir = m15_score.direction
@@ -346,12 +377,9 @@ def _analyse_bar(
         agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
 
         if not agree:
-            return "WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count
+            return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
 
         confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
-
-        if confidence < Config.MIN_CONFIDENCE_PCT:
-            return "WAIT", confidence, None, m15_score.bullish_count, m15_score.bearish_count
 
         # ── Risk calculation ───────────────────────────────────────────
         entry_price = m15_ind.latest_close
@@ -363,11 +391,15 @@ def _analyse_bar(
             sr_levels=m15_sr,
         )
 
-        return m15_dir, confidence, risk, m15_score.bullish_count, m15_score.bearish_count
+        return _AnalysisResult(
+            m15_dir, confidence, risk,
+            m15_score.bullish_count, m15_score.bearish_count,
+            sr_levels=m15_sr, current_price=entry_price,
+        )
 
     except Exception as exc:
         logger.debug("Analysis failed at bar: %s", exc)
-        return None, 0.0, None, 0, 0
+        return _AnalysisResult(None, 0.0, None, 0, 0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -505,6 +537,130 @@ def _check_exit(
             return False
 
     return False  # trade still open
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIMIT ORDER HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _PendingOrder:
+    """A pending limit order waiting to be filled."""
+    __slots__ = (
+        "direction", "limit_price", "stop_loss", "tp1_price", "tp2_price",
+        "sl_pips", "tp1_pips", "tp2_pips", "confidence_pct", "lot_size",
+        "created_bar", "created_time", "expiry_bars",
+    )
+
+    def __init__(
+        self, direction, limit_price, stop_loss, tp1_price, tp2_price,
+        sl_pips, tp1_pips, tp2_pips, confidence_pct, lot_size,
+        created_bar, created_time, expiry_bars,
+    ):
+        self.direction = direction
+        self.limit_price = limit_price
+        self.stop_loss = stop_loss
+        self.tp1_price = tp1_price
+        self.tp2_price = tp2_price
+        self.sl_pips = sl_pips
+        self.tp1_pips = tp1_pips
+        self.tp2_pips = tp2_pips
+        self.confidence_pct = confidence_pct
+        self.lot_size = lot_size
+        self.created_bar = created_bar
+        self.created_time = created_time
+        self.expiry_bars = expiry_bars
+
+    def is_expired(self, current_bar: int) -> bool:
+        return (current_bar - self.created_bar) >= self.expiry_bars
+
+    def is_filled(self, bar_high: float, bar_low: float) -> bool:
+        """Check if price reached our limit during this bar."""
+        if self.direction == "BUY":
+            return bar_low <= self.limit_price
+        else:  # SELL
+            return bar_high >= self.limit_price
+
+
+def _find_limit_entry(
+    direction: str,
+    current_price: float,
+    sr_levels,
+    max_distance_pips: float,
+    sl_pips: float,
+) -> Optional[_PendingOrder]:
+    """
+    Find the nearest S/R level for a limit order entry.
+
+    For BUY: find nearest support below current price (buy the dip).
+    For SELL: find nearest resistance above current price (sell the rally).
+
+    Checks strong zones first, then falls back to ALL zones if no strong
+    zone is within range.
+
+    Returns a partially filled _PendingOrder (without lot_size/bar info),
+    or None if no suitable S/R level within max_distance_pips.
+    """
+    if sr_levels is None:
+        return None
+
+    if direction == "BUY":
+        # Try strong zone first, then any zone
+        zone = sr_levels.nearest_support
+        if zone is None or zone.price >= current_price:
+            # Fallback: find nearest support zone (any strength) below price
+            candidates = [
+                z for z in sr_levels.zones
+                if z.zone_type == "support" and z.price < current_price
+            ]
+            if not candidates:
+                return None
+            zone = min(candidates, key=lambda z: current_price - z.price)
+
+        dist_pips = price_to_pips(current_price - zone.price)
+        if dist_pips > max_distance_pips or dist_pips < 1.0:
+            return None
+        limit_price = zone.price
+        stop_loss = limit_price - pips_to_price(sl_pips)
+        tp1_price = limit_price + pips_to_price(sl_pips)
+        tp2_price = limit_price + pips_to_price(sl_pips * 2)
+
+    elif direction == "SELL":
+        zone = sr_levels.nearest_resistance
+        if zone is None or zone.price <= current_price:
+            candidates = [
+                z for z in sr_levels.zones
+                if z.zone_type == "resistance" and z.price > current_price
+            ]
+            if not candidates:
+                return None
+            zone = min(candidates, key=lambda z: z.price - current_price)
+
+        dist_pips = price_to_pips(zone.price - current_price)
+        if dist_pips > max_distance_pips or dist_pips < 1.0:
+            return None
+        limit_price = zone.price
+        stop_loss = limit_price + pips_to_price(sl_pips)
+        tp1_price = limit_price - pips_to_price(sl_pips)
+        tp2_price = limit_price - pips_to_price(sl_pips * 2)
+
+    else:
+        return None
+
+    return _PendingOrder(
+        direction=direction,
+        limit_price=limit_price,
+        stop_loss=stop_loss,
+        tp1_price=tp1_price,
+        tp2_price=tp2_price,
+        sl_pips=sl_pips,
+        tp1_pips=sl_pips,        # 1:1 RR for TP1
+        tp2_pips=sl_pips * 2,    # 2:1 RR for TP2
+        confidence_pct=0.0,      # set later
+        lot_size=0.0,            # set later
+        created_bar=0,           # set later
+        created_time=None,       # set later
+        expiry_bars=0,           # set later
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -756,67 +912,123 @@ def _simulate_prop_firm(
 # MAIN BACKTEST FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_historical_data(
-    cfg: BacktestConfig,
+def _yf_fetch(
+    yf_symbol: str,
+    interval: str,
+    max_days: int,
+    label: str,
 ) -> Optional[pd.DataFrame]:
     """
-    Fetch 2 years of M15 data for backtesting.
-
-    Uses yfinance (get_candles with fallback). The data is fetched in
-    chunks if necessary to respect yfinance's 60-day limit for M15.
+    Fetch a single timeframe from yfinance.  Returns normalised DataFrame or None.
     """
-    logger.info("Fetching historical M15 data for backtest...")
+    import yfinance as yf
+    from data.fetcher import _normalise_columns, _validate_ohlcv
 
-    # yfinance M15 limit is 60 days per request — we need ~730 days
-    # Fetch in chunks of 59 days
-    chunk_days = 59
-    total_days = Config.HISTORICAL_YEARS * 365
-    all_chunks = []
+    now_dt = datetime.now(timezone.utc)
+    end_dt = now_dt + timedelta(days=1)
+    start_dt = now_dt - timedelta(days=max_days)
 
-    end_dt = datetime.now(timezone.utc)
-    remaining = total_days
-
-    while remaining > 0:
-        fetch_days = min(chunk_days, remaining)
-        start_dt = end_dt - timedelta(days=fetch_days)
-
-        try:
-            raw = get_candles(
-                timeframe="M15",
-                n_candles=fetch_days * 24 * 4,  # approximate M15 bars
-                symbol=cfg.symbol,
-            )
-            if raw is not None and not raw.empty:
-                # Filter to the date range we want
-                mask = (raw.index >= start_dt) & (raw.index <= end_dt)
-                chunk = raw[mask]
-                if not chunk.empty:
-                    all_chunks.append(chunk)
-        except Exception as exc:
-            logger.warning("Chunk fetch failed for %s → %s: %s", start_dt, end_dt, exc)
-
-        end_dt = start_dt
-        remaining -= fetch_days
-
-    if not all_chunks:
-        logger.error("No historical data retrieved.")
+    try:
+        raw = yf.Ticker(yf_symbol).history(
+            start=start_dt.strftime("%Y-%m-%d"),
+            end=end_dt.strftime("%Y-%m-%d"),
+            interval=interval,
+            auto_adjust=True,
+            prepost=False,
+        )
+    except Exception as exc:
+        print(f"[Backtest] ERROR: yfinance {label} fetch failed — {exc}")
         return None
 
-    # Combine and deduplicate
-    combined = pd.concat(all_chunks)
-    combined = combined[~combined.index.duplicated(keep="first")]
-    combined = combined.sort_index()
+    if raw is None or raw.empty:
+        print(f"[Backtest] ERROR: yfinance returned no {label} data.")
+        return None
 
-    logger.info(
-        "Historical data: %d bars from %s to %s",
-        len(combined), combined.index[0], combined.index[-1],
-    )
-    return combined
+    df = _normalise_columns(raw)
+    df = _validate_ohlcv(df, f"backtest:{yf_symbol}:{interval}")
+    if df.empty:
+        return None
+
+    print(f"[Backtest] {label}: {len(df):,} bars "
+          f"({df.index[0].strftime('%Y-%m-%d')} → {df.index[-1].strftime('%Y-%m-%d')})")
+    return df
+
+
+def _fetch_historical_data(
+    cfg: BacktestConfig,
+) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """
+    Fetch M15 + H1 data separately, respecting yfinance hard limits.
+
+    yfinance limits:
+      15m → last 60 days only
+      1h  → last 730 days (~2 years)
+
+    Returns:
+        (m15_df, h1_df) — either may be None on failure.
+        H1 data covers ~1 year for proper indicator warm-up.
+    """
+    yf_symbol = Config.YFINANCE_SYMBOL  # "GC=F"
+
+    print("\n[Backtest] Fetching dual-timeframe data...")
+    print("[Backtest]   M15: last 59 days (yfinance hard limit)")
+    print("[Backtest]   H1 : last 365 days (separate fetch for proper indicators)\n")
+
+    m15_df = _yf_fetch(yf_symbol, "15m", 59, "M15")
+    h1_df = _yf_fetch(yf_symbol, "1h", 365, "H1")
+
+    return m15_df, h1_df
+
+
+def _train_ml_for_backtest(
+    m15_processed: pd.DataFrame,
+    h1_processed: pd.DataFrame,
+    force_retrain: bool = True,
+) -> bool:
+    """
+    Train ML models on H1 data (1 year, ~5,900 bars).
+
+    Why H1 only (not mixed):
+      - Mixed M15+H1 confuses the model because the target variable
+        (15 candles ahead) means 3.75h on M15 vs 15h on H1.
+      - H1 alone gives a consistent dataset with 5,900+ bars — plenty
+        for walk-forward CV.
+      - The trained model filters M15 signals by predicting whether the
+        broader H1 trend confirms the M15 direction.
+
+    Returns True if models are ready.
+    """
+    from ml.predictor import is_model_ready, invalidate_cache
+
+    if not force_retrain and is_model_ready():
+        print("[Backtest] ML models already trained — using existing models.")
+        return True
+
+    print(f"[Backtest] Training ML on H1 data ({len(h1_processed):,} bars, ~1 year)...")
+
+    try:
+        from ml.trainer import train
+        result = train(h1_processed, save=True)
+        if result.rejected:
+            print(f"[Backtest] ML training rejected (accuracy too low: "
+                  f"XGB={result.xgb_accuracy:.1%}, RF={result.rf_accuracy:.1%})")
+            print("[Backtest] Continuing without ML filter.")
+            return False
+        print(f"[Backtest] ML trained: XGB={result.xgb_accuracy:.1%} "
+              f"RF={result.rf_accuracy:.1%} | "
+              f"{result.n_samples} samples, {result.n_features} features")
+        invalidate_cache()
+        return True
+    except Exception as exc:
+        print(f"[Backtest] ML training failed: {exc}")
+        print("[Backtest] Continuing without ML filter.")
+        return False
 
 
 def run_backtest(
     cfg: Optional[BacktestConfig] = None,
     m15_data: Optional[pd.DataFrame] = None,
+    h1_data: Optional[pd.DataFrame] = None,
 ) -> BacktestResult:
     """
     Run the full backtest simulation.
@@ -824,19 +1036,11 @@ def run_backtest(
     Args:
         cfg:      Backtest configuration. Uses defaults if None.
         m15_data: Pre-loaded M15 DataFrame. If None, fetches from yfinance.
+        h1_data:  Pre-loaded H1 DataFrame. If None, fetches from yfinance
+                  (1 year of real H1 data for proper indicator warm-up).
 
     Returns:
         BacktestResult with all statistics, trades, and prop firm simulations.
-
-    Usage:
-        # Simple — use defaults
-        result = run_backtest()
-
-        # With custom config
-        result = run_backtest(BacktestConfig(spread_pips=2.0))
-
-        # With pre-loaded data
-        result = run_backtest(m15_data=my_dataframe)
     """
     if cfg is None:
         cfg = BacktestConfig()
@@ -844,27 +1048,44 @@ def run_backtest(
     logger.info("Starting backtest with config: %s", cfg)
 
     # ── Step 1: Get data ───────────────────────────────────────────────
-    if m15_data is None:
-        m15_data = _fetch_historical_data(cfg)
+    if m15_data is None or h1_data is None:
+        fetched_m15, fetched_h1 = _fetch_historical_data(cfg)
+        if m15_data is None:
+            m15_data = fetched_m15
+        if h1_data is None:
+            h1_data = fetched_h1
+
     if m15_data is None or m15_data.empty:
-        logger.error("No data available for backtest.")
+        print("\n[Backtest] FAILED: Could not fetch M15 data.")
+        return BacktestResult(config=cfg, final_balance=cfg.account_balance)
+    if h1_data is None or h1_data.empty:
+        print("\n[Backtest] FAILED: Could not fetch H1 data.")
         return BacktestResult(config=cfg, final_balance=cfg.account_balance)
 
-    # Process the raw data
+    # Process both timeframes
     m15_processed = process(m15_data, timeframe="M15", label="BT_M15")
+    h1_processed = process(h1_data, timeframe="H1", label="BT_H1")
+
     if m15_processed is None or m15_processed.empty:
-        logger.error("Data processing failed.")
+        print("\n[Backtest] FAILED: M15 data processing returned empty DataFrame.")
+        return BacktestResult(config=cfg, final_balance=cfg.account_balance)
+    if h1_processed is None or h1_processed.empty:
+        print("\n[Backtest] FAILED: H1 data processing returned empty DataFrame.")
         return BacktestResult(config=cfg, final_balance=cfg.account_balance)
 
-    # Build H1 data from M15
-    h1_data = _resample_to_h1(m15_processed)
+    print(f"[Backtest] Processed: M15={len(m15_processed):,} bars, H1={len(h1_processed):,} bars")
 
-    logger.info(
-        "Backtest data ready: M15=%d bars, H1=%d bars",
-        len(m15_processed), len(h1_data),
-    )
+    # ── Step 2: Train ML models ────────────────────────────────────────
+    ml_available = False
+    ml_predict_fn = None
 
-    # ── Step 2: Walk-forward simulation ────────────────────────────────
+    if cfg.use_ml:
+        ml_available = _train_ml_for_backtest(m15_processed, h1_processed)
+        if ml_available:
+            from ml.predictor import predict as ml_predict
+            ml_predict_fn = ml_predict
+
+    # ── Step 3: Walk-forward simulation ────────────────────────────────
     trades: list[BacktestTrade] = []
     open_trade: Optional[BacktestTrade] = None
     bars_since_last_trade = cfg.min_bars_between_trades  # allow first trade immediately
@@ -880,6 +1101,20 @@ def run_backtest(
     )
 
     progress_step = max(1, (total_bars - start_idx) // 20)  # log every 5%
+    signals_found = 0
+    ml_filtered = 0
+    circuit_breaker_paused = 0  # count of bars skipped by circuit breaker
+    limit_orders_placed = 0    # count of limit orders placed
+    limit_orders_filled = 0    # count of limit orders filled
+    limit_orders_expired = 0   # count of limit orders expired
+    limit_no_sr = 0            # count of signals skipped (no S/R within range)
+
+    # Circuit breaker state: pause after 3 consecutive losses in one day
+    consecutive_losses = 0
+    paused_until_day: Optional[str] = None  # YYYY-MM-DD — skip rest of this day
+
+    # Pending limit order (only one at a time, like open trades)
+    pending_order: Optional[_PendingOrder] = None
 
     for i in range(start_idx, total_bars):
         bar = m15_processed.iloc[i]
@@ -892,19 +1127,69 @@ def run_backtest(
             pct = (i - start_idx) / (total_bars - start_idx) * 100
             logger.info("Backtest progress: %.0f%% (%d/%d bars)", pct, i - start_idx, total_bars - start_idx)
 
+        # ── Reset circuit breaker on new day ──────────────────────────
+        current_day = bar_time.strftime("%Y-%m-%d")
+        if paused_until_day and current_day != paused_until_day:
+            paused_until_day = None
+            consecutive_losses = 0
+
+        # ── Check pending limit order fill / expiry ───────────────────
+        if pending_order is not None and open_trade is None:
+            if pending_order.is_expired(i):
+                limit_orders_expired += 1
+                pending_order = None
+            elif pending_order.is_filled(bar_high, bar_low):
+                # Limit order filled — open the trade
+                limit_orders_filled += 1
+                entry = pending_order.limit_price
+                entry = _apply_spread(entry, pending_order.direction, cfg.spread_pips)
+
+                open_trade = BacktestTrade(
+                    entry_time=bar_time,
+                    entry_price=entry,
+                    direction=pending_order.direction,
+                    confidence_pct=pending_order.confidence_pct,
+                    lot_size=pending_order.lot_size,
+                    stop_loss=pending_order.stop_loss,
+                    tp1_price=pending_order.tp1_price,
+                    tp2_price=pending_order.tp2_price,
+                    sl_pips=pending_order.sl_pips,
+                    tp1_pips=pending_order.tp1_pips,
+                    tp2_pips=pending_order.tp2_pips,
+                )
+                pending_order = None
+                bars_since_last_trade = 0
+                continue  # don't check exit on fill bar
+
         # ── Check open trade exit ──────────────────────────────────────
         if open_trade is not None:
             closed = _check_exit(open_trade, bar_high, bar_low, bar_time)
             if closed:
                 trades.append(open_trade)
+                # Track consecutive losses for circuit breaker
+                if open_trade.is_winner:
+                    consecutive_losses = 0
+                else:
+                    consecutive_losses += 1
+                    if consecutive_losses >= 3 and paused_until_day is None:
+                        paused_until_day = current_day
+                        logger.debug(
+                            "Circuit breaker: 3 consecutive losses on %s — pausing",
+                            current_day,
+                        )
                 open_trade = None
                 bars_since_last_trade = 0
                 continue  # don't open a new trade on the same bar
 
         bars_since_last_trade += 1
 
-        # ── Skip if we already have an open trade ──────────────────────
-        if open_trade is not None:
+        # ── Skip if we already have an open trade or pending order ────
+        if open_trade is not None or pending_order is not None:
+            continue
+
+        # ── Circuit breaker: skip if paused for today ──────────────────
+        if paused_until_day == current_day:
+            circuit_breaker_paused += 1
             continue
 
         # ── Skip if too soon after last trade ──────────────────────────
@@ -914,45 +1199,88 @@ def run_backtest(
         # ── Run analysis on lookback window ────────────────────────────
         m15_slice = m15_processed.iloc[max(0, i - lookback):i + 1]
 
-        # Get corresponding H1 data up to this point
-        h1_mask = h1_data.index <= bar_time
-        h1_slice = h1_data[h1_mask].tail(lookback // 4)  # roughly lookback/4 H1 bars
+        # Get corresponding H1 data up to this point (real H1, not resampled)
+        h1_mask = h1_processed.index <= bar_time
+        h1_slice = h1_processed[h1_mask].tail(lookback)
 
         if len(m15_slice) < min_bars or len(h1_slice) < 50:
             continue
 
         # ── Analyse ────────────────────────────────────────────────────
-        direction, confidence, risk, bull_count, bear_count = _analyse_bar(m15_slice, h1_slice)
+        analysis = _analyse_bar(m15_slice, h1_slice, bar_time=bar_time)
 
-        if direction is None or direction == "WAIT" or risk is None:
+        if analysis.direction is None or analysis.direction == "WAIT" or analysis.risk is None:
             continue
 
-        # ── Open trade ─────────────────────────────────────────────────
-        entry = risk.entry_price
-        entry = _apply_spread(entry, direction, cfg.spread_pips)
-        entry = _apply_slippage(entry, direction, cfg.slippage_pips)
+        direction = analysis.direction
+        confidence = analysis.confidence
+        risk = analysis.risk
+        signals_found += 1
 
-        # Recalculate lot size for backtest account balance
+        # ── ML filter ──────────────────────────────────────────────────
+        if ml_available and ml_predict_fn is not None:
+            prediction = ml_predict_fn(m15_slice)
+            if prediction.available and not prediction.confirms(direction):
+                ml_filtered += 1
+                continue
+
+        # ── Calculate lot size ─────────────────────────────────────────
         current_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
-        risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
         pip_value = Config.GOLD_PIP_VALUE
-        lot_size = risk_usd / (risk.sl_pips * pip_value) if risk.sl_pips > 0 else 0.01
-        lot_size = round(max(0.01, lot_size), 2)
 
-        open_trade = BacktestTrade(
-            entry_time=bar_time,
-            entry_price=entry,
-            direction=direction,
-            confidence_pct=confidence,
-            lot_size=lot_size,
-            stop_loss=risk.stop_loss,
-            tp1_price=risk.tp1_price,
-            tp2_price=risk.tp2_price,
-            sl_pips=risk.sl_pips,
-            tp1_pips=risk.tp1_pips,
-            tp2_pips=risk.tp2_pips,
-        )
-        bars_since_last_trade = 0
+        # ── Limit order entry (at S/R levels) ─────────────────────────
+        if cfg.use_limit_orders:
+            pending = _find_limit_entry(
+                direction=direction,
+                current_price=analysis.current_price,
+                sr_levels=analysis.sr_levels,
+                max_distance_pips=cfg.limit_max_distance_pips,
+                sl_pips=cfg.limit_sl_pips,
+            )
+            if pending is None:
+                limit_no_sr += 1
+                continue  # no suitable S/R level — skip signal
+
+            # Set lot size, bar info, confidence
+            sl_for_lot = cfg.limit_sl_pips
+            risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
+            lot_size = risk_usd / (sl_for_lot * pip_value) if sl_for_lot > 0 else 0.01
+            lot_size = round(max(0.01, lot_size), 2)
+
+            pending.lot_size = lot_size
+            pending.confidence_pct = confidence
+            pending.created_bar = i
+            pending.created_time = bar_time
+            pending.expiry_bars = cfg.limit_expiry_bars
+
+            pending_order = pending
+            limit_orders_placed += 1
+            bars_since_last_trade = 0
+
+        else:
+            # ── Market order entry (original logic) ───────────────────
+            entry = risk.entry_price
+            entry = _apply_spread(entry, direction, cfg.spread_pips)
+            entry = _apply_slippage(entry, direction, cfg.slippage_pips)
+
+            risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
+            lot_size = risk_usd / (risk.sl_pips * pip_value) if risk.sl_pips > 0 else 0.01
+            lot_size = round(max(0.01, lot_size), 2)
+
+            open_trade = BacktestTrade(
+                entry_time=bar_time,
+                entry_price=entry,
+                direction=direction,
+                confidence_pct=confidence,
+                lot_size=lot_size,
+                stop_loss=risk.stop_loss,
+                tp1_price=risk.tp1_price,
+                tp2_price=risk.tp2_price,
+                sl_pips=risk.sl_pips,
+                tp1_pips=risk.tp1_pips,
+                tp2_pips=risk.tp2_pips,
+            )
+            bars_since_last_trade = 0
 
     # ── Close any remaining open trade at last bar's close ─────────────
     if open_trade is not None:
@@ -970,12 +1298,25 @@ def run_backtest(
         open_trade.is_winner = open_trade.pnl_pips > 0
         trades.append(open_trade)
 
+    # Cancel any remaining pending order
+    if pending_order is not None:
+        limit_orders_expired += 1
+        pending_order = None
+
+    if cfg.use_limit_orders:
+        print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
+              f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
+              f"| Circuit breaker skips: {circuit_breaker_paused} | Trades: {len(trades)}")
+    else:
+        print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| Circuit breaker skips: {circuit_breaker_paused} | Trades taken: {len(trades)}")
     logger.info("Backtest complete: %d trades generated.", len(trades))
 
-    # ── Step 3: Compute statistics ─────────────────────────────────────
+    # ── Step 4: Compute statistics ─────────────────────────────────────
     result = _compute_statistics(trades, cfg)
 
-    # ── Step 4: Prop firm simulations ──────────────────────────────────
+    # ── Step 5: Prop firm simulations ──────────────────────────────────
     if cfg.simulate_prop_firm:
         for firm_key in PROP_FIRM_PROFILES:
             sim = _simulate_prop_firm(trades, firm_key, cfg.account_balance)
@@ -1002,6 +1343,8 @@ if __name__ == "__main__":
     )
 
     print("Running GoldSignalAI backtest...\n")
+    print(f"Confidence threshold: {Config.MIN_CONFIDENCE_PCT}% (same as live)")
+    print(f"ML filter: enabled\n")
     result = run_backtest()
     print(result.summary())
 

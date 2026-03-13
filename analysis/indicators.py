@@ -100,11 +100,13 @@ class AllIndicators:
     latest_close: float = 0.0
 
     def as_list(self) -> list[IndicatorResult]:
-        """Return all 10 results in order."""
+        """Return the 9 voted indicators (BBands excluded — negative predictive accuracy).
+        ATR is directionally neutral and also excluded from voting; bbands is kept
+        on the dataclass for ML feature use only."""
         return [
             self.ema, self.adx, self.ichimoku, self.rsi,
             self.macd, self.stochastic, self.cci,
-            self.bbands, self.atr, self.volume,
+            self.atr, self.volume,
         ]
 
     def bullish_count(self) -> int:
