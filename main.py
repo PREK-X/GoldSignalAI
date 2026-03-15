@@ -36,7 +36,6 @@ Usage:
 import argparse
 import json
 import logging
-import logging.handlers
 import os
 import signal
 import subprocess
@@ -47,47 +46,10 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from config import Config
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING SETUP
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _setup_logging() -> None:
-    """
-    Configure root logger: file handler (rotating) + console handler.
-
-    File:    logs/goldsignal.log (10 MB rotation, 5 backups)
-    Console: same format, respects Config.LOG_LEVEL
-    """
-    os.makedirs(Config.LOGS_DIR, exist_ok=True)
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)  # capture everything; handlers filter
-
-    fmt = logging.Formatter(
-        "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    # Rotating file handler
-    fh = logging.handlers.RotatingFileHandler(
-        Config.LOG_FILE,
-        maxBytes=Config.LOG_MAX_BYTES,
-        backupCount=Config.LOG_BACKUP_COUNT,
-    )
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    # Console handler
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(getattr(logging, Config.LOG_LEVEL.upper(), logging.INFO))
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    # Suppress noisy third-party loggers
-    for name in ("urllib3", "yfinance", "matplotlib", "PIL", "telegram"):
-        logging.getLogger(name).setLevel(logging.WARNING)
+from infrastructure.logger import setup_logging
+from infrastructure.monitoring import init_sentry
+from infrastructure.health import run_health_check
+from database.db import initialize_database, save_signal, save_trade, has_recent_signal
 
 
 logger = logging.getLogger("GoldSignalAI")
@@ -98,7 +60,8 @@ logger = logging.getLogger("GoldSignalAI")
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _log_signal(signal_data: dict) -> None:
-    """Append a signal record to the JSON signal history file."""
+    """Append a signal record to JSON history file + SQLite database."""
+    # ── JSON file (existing behaviour) ────────────────────────────────
     try:
         history = []
         if os.path.isfile(Config.SIGNAL_HISTORY_FILE):
@@ -116,6 +79,12 @@ def _log_signal(signal_data: dict) -> None:
 
     except Exception as exc:
         logger.warning("Failed to write signal history: %s", exc)
+
+    # ── SQLite database ───────────────────────────────────────────────
+    try:
+        save_signal(signal_data)
+    except Exception as exc:
+        logger.warning("Failed to save signal to database: %s", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +248,21 @@ def _process_signal(
             tracker.record_trade(trade)
         except Exception as exc:
             logger.warning("Compliance tracking failed: %s", exc)
+
+        # Save trade to SQLite database
+        try:
+            save_trade({
+                "timestamp": sig.timestamp.isoformat(),
+                "direction": sig.direction,
+                "entry_price": sig.entry_price,
+                "stop_loss": sig.risk.stop_loss if sig.risk else None,
+                "take_profit1": sig.risk.tp1_price if sig.risk else None,
+                "take_profit2": sig.risk.tp2_price if sig.risk else None,
+                "lot_size": sig.risk.suggested_lot if sig.risk else None,
+                "status": "open",
+            })
+        except Exception as exc:
+            logger.warning("Failed to save trade to database: %s", exc)
 
     else:
         logger.info("Non-actionable signal: %s (%s)", sig.direction, sig.reason)
@@ -504,7 +488,24 @@ def _main_loop(shutdown_event: threading.Event) -> None:
                 news_paused=news_paused,
                 pause_reason=pause_reason,
             )
-            signal_count = _process_signal(sig, tracker, signal_count)
+
+            # ── 5b. Duplicate signal check ────────────────────────────
+            if sig.is_actionable and has_recent_signal(sig.direction, hours=4.0):
+                logger.info(
+                    "Duplicate %s signal suppressed (same direction within 4h)",
+                    sig.direction,
+                )
+                # Still log but don't alert/trade
+                _log_signal({
+                    "timestamp": sig.timestamp.isoformat(),
+                    "direction": sig.direction,
+                    "confidence_pct": sig.confidence_pct,
+                    "entry_price": sig.entry_price,
+                    "reason": f"DUPLICATE_SUPPRESSED: {sig.reason}",
+                    "is_paused": True,
+                })
+            else:
+                signal_count = _process_signal(sig, tracker, signal_count)
 
         except Exception as exc:
             logger.exception("Signal generation failed: %s", exc)
@@ -545,11 +546,27 @@ def main() -> None:
         "--no-telegram", action="store_true",
         help="Disable the Telegram bot command handler",
     )
+    parser.add_argument(
+        "--health-check", action="store_true",
+        help="Run startup health check and exit",
+    )
     args = parser.parse_args()
 
     # ── Logging ────────────────────────────────────────────────────────
-    _setup_logging()
+    setup_logging()
+
+    # ── Health check mode ──────────────────────────────────────────────
+    if args.health_check:
+        ok = run_health_check()
+        sys.exit(0 if ok else 1)
+
     _print_banner()
+
+    # ── Sentry error monitoring ────────────────────────────────────────
+    init_sentry()
+
+    # ── Initialize database ────────────────────────────────────────────
+    initialize_database()
 
     # ── Ensure directories exist ───────────────────────────────────────
     for d in (Config.DATA_DIR, Config.MODELS_DIR, Config.LOGS_DIR, Config.REPORTS_DIR):
