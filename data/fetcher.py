@@ -26,6 +26,7 @@ import pandas as pd
 import yfinance as yf
 
 from config import Config
+from data.polygon_fetcher import fetch_polygon_data, is_polygon_available
 
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING
@@ -400,6 +401,129 @@ def _fetch_yfinance(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# POLYGON FETCH (primary for historical data)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fetch_polygon(
+    symbol: str,
+    timeframe: str,
+    n_candles: int,
+) -> Optional[pd.DataFrame]:
+    """
+    Fetch OHLCV data from Polygon.io.
+
+    Args:
+        symbol:    Ignored — always uses Config.POLYGON_SYMBOL for forex
+        timeframe: Our string key, e.g. "M15" or "H1"
+        n_candles: Approximate number of candles needed
+
+    Returns:
+        Normalised DataFrame or None on failure.
+    """
+    if not Config.POLYGON_API_KEY:
+        logger.debug("Polygon API key not configured — skipping.")
+        return None
+
+    # Calculate date range from n_candles
+    minutes_per_candle = {"M1": 1, "M5": 5, "M15": 15, "M30": 30,
+                          "H1": 60, "H4": 240, "D1": 1440}
+    mins = minutes_per_candle.get(timeframe, 15)
+    # Gold trades ~20h/day, 5 days/week → ~100 candles/day for M15
+    trading_hours_per_day = 20
+    candles_per_day = int(trading_hours_per_day * 60 / mins)
+    days_needed = max(2, int(n_candles / max(candles_per_day, 1) * 1.5))
+
+    now_dt = datetime.now(timezone.utc)
+    start_dt = now_dt - timedelta(days=days_needed)
+
+    try:
+        df = fetch_polygon_data(
+            symbol=Config.POLYGON_SYMBOL,
+            timeframe=timeframe,
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=now_dt.strftime("%Y-%m-%d"),
+        )
+    except Exception as exc:
+        logger.warning("Polygon fetch failed: %s", exc)
+        return None
+
+    if df is None or df.empty:
+        return None
+
+    df = _normalise_columns(df)
+    df = _validate_ohlcv(df, f"Polygon:{timeframe}")
+
+    # Trim to requested candle count
+    if len(df) > n_candles:
+        df = df.iloc[-n_candles:]
+
+    logger.info(
+        "Polygon fetched %d candles for %s (latest: %s)",
+        len(df), timeframe, df.index[-1] if len(df) > 0 else "N/A"
+    )
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNIFIED DATA ACCESS (with fallback hierarchy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_market_data(
+    symbol: str = Config.SYMBOL,
+    timeframe: str = Config.PRIMARY_TIMEFRAME,
+    bars: int = Config.LOOKBACK_CANDLES,
+) -> Optional[pd.DataFrame]:
+    """
+    Fetch market data using the configured fallback hierarchy:
+        1. Polygon.io (primary — 2+ years of data)
+        2. MT5 (if available and configured)
+        3. yfinance (last resort — limited to ~60 days for M15)
+
+    The system automatically chooses the best available source.
+
+    Args:
+        symbol:    Asset symbol (e.g. "XAUUSD")
+        timeframe: "M15", "H1", etc.
+        bars:      Number of candles to return
+
+    Returns:
+        DataFrame with [open, high, low, close, volume] and UTC DatetimeIndex,
+        or None if all sources fail.
+    """
+    yf_symbol = Config.YFINANCE_SYMBOL if symbol == Config.SYMBOL else symbol
+    sources_tried = []
+
+    for source in Config.DATA_SOURCE_PRIORITY:
+        if source == "polygon":
+            df = _fetch_polygon(symbol, timeframe, bars)
+            if df is not None and len(df) > 0:
+                logger.info("Data source: Polygon (%d bars)", len(df))
+                return df
+            sources_tried.append("polygon")
+
+        elif source == "mt5":
+            if MT5_AVAILABLE and Config.MT5_LOGIN != 0:
+                df = _fetch_mt5(symbol, timeframe, bars)
+                if df is not None and len(df) > 0:
+                    logger.info("Data source: MT5 (%d bars)", len(df))
+                    return df
+            sources_tried.append("mt5")
+
+        elif source == "yfinance":
+            df = _fetch_yfinance(yf_symbol, timeframe, bars)
+            if df is not None and len(df) > 0:
+                logger.info("Data source: yfinance (%d bars)", len(df))
+                return df
+            sources_tried.append("yfinance")
+
+    logger.error(
+        "All data sources failed for %s %s. Tried: %s",
+        symbol, timeframe, sources_tried,
+    )
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HISTORICAL DATA FOR ML TRAINING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -425,6 +549,25 @@ def fetch_historical(
         Combined DataFrame sorted by time, or None on complete failure.
     """
     logger.info("Fetching %d years of %s %s historical data…", years, symbol, timeframe)
+
+    # ── Polygon path: best for long historical data ───────────────────────
+    if Config.POLYGON_API_KEY:
+        try:
+            now = datetime.now(timezone.utc)
+            start_dt = now - timedelta(days=365 * years)
+            df = fetch_polygon_data(
+                symbol=Config.POLYGON_SYMBOL,
+                timeframe=timeframe,
+                start_date=start_dt.strftime("%Y-%m-%d"),
+                end_date=now.strftime("%Y-%m-%d"),
+            )
+            if df is not None and len(df) > 100:
+                df = _normalise_columns(df)
+                df = _validate_ohlcv(df, f"Polygon_hist:{timeframe}")
+                logger.info("Polygon historical: %d candles fetched.", len(df))
+                return df
+        except Exception as exc:
+            logger.warning("Polygon historical fetch failed: %s — trying other sources.", exc)
 
     # ── MT5 path: can request large amounts directly ──────────────────────
     if use_mt5 and MT5Connection.ensure_connected():
@@ -534,35 +677,16 @@ def get_candles(
         >>> df = get_candles("M15", 300)
         >>> df.tail()
     """
-    yf_symbol = Config.YFINANCE_SYMBOL if symbol == Config.SYMBOL else symbol
-
     for attempt in range(1, retries + 1):
-        # ── Attempt 1: MT5 ───────────────────────────────────────────────
-        if MT5_AVAILABLE and Config.MT5_LOGIN != 0:
-            df = _fetch_mt5(symbol, timeframe, n_candles)
-            if df is not None and len(df) >= Config.MIN_CANDLES_FOR_SIGNAL:
-                return df
-            if attempt < retries:
-                logger.warning(
-                    "MT5 fetch attempt %d/%d failed — retrying in %.1fs…",
-                    attempt, retries, retry_delay
-                )
-                time.sleep(retry_delay)
-                continue
-
-        # ── Fallback: yfinance ────────────────────────────────────────────
-        logger.info(
-            "Using yfinance fallback for %s %s (attempt %d/%d).",
-            symbol, timeframe, attempt, retries
-        )
-        df = _fetch_yfinance(yf_symbol, timeframe, n_candles)
+        # Use the unified fallback system
+        df = get_market_data(symbol, timeframe, n_candles)
         if df is not None and len(df) > 0:
             return df
 
         if attempt < retries:
             logger.warning(
-                "yfinance fetch attempt %d/%d failed — retrying in %.1fs…",
-                attempt, retries, retry_delay
+                "Fetch attempt %d/%d failed — retrying in %.1fs…",
+                attempt, retries, retry_delay,
             )
             time.sleep(retry_delay)
 
@@ -619,10 +743,21 @@ def get_data_source_status() -> dict:
     Used by the dashboard and Telegram /status command.
     """
     mt5_ok = MT5Connection.is_connected()
+    polygon_ok = bool(Config.POLYGON_API_KEY)
+
+    if polygon_ok:
+        active = "Polygon.io (primary)"
+    elif mt5_ok:
+        active = "MT5"
+    else:
+        active = "yfinance (fallback)"
+
     return {
+        "polygon_configured": polygon_ok,
         "mt5_available":  MT5_AVAILABLE,
         "mt5_connected":  mt5_ok,
-        "active_source":  "MT5" if mt5_ok else "yfinance (fallback)",
+        "active_source":  active,
+        "source_priority": Config.DATA_SOURCE_PRIORITY,
         "symbol":         Config.SYMBOL,
         "yf_symbol":      Config.YFINANCE_SYMBOL,
         "market_open":    is_market_open(),

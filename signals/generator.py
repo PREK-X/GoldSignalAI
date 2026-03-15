@@ -161,27 +161,28 @@ def generate_signal(
         bull_count = bear_count = 0
 
     # ── Step 2: ML prediction ─────────────────────────────────────────────
-    ml_pred = MLPrediction(available=False, reason="ML not run")
+    ml_pred = MLPrediction(available=False, reason="ML filter disabled (USE_ML_FILTER=False)")
+    ml_confirms = False
 
-    if mtf.m15.df is not None:
+    if Config.USE_ML_FILTER and mtf.m15.df is not None:
         try:
             ml_pred = predict(mtf.m15.df)
         except Exception as exc:
             logger.warning("ML prediction failed: %s", exc)
             ml_pred = MLPrediction(available=False, reason=f"Error: {exc}")
 
-    # ML confirmation check
-    ml_confirms = ml_pred.confirms(direction)
+        # ML confirmation check
+        ml_confirms = ml_pred.confirms(direction)
 
-    # If ML is available and actively contradicts, downgrade to WAIT
-    if ml_pred.available and ml_pred.models_agree and direction in ("BUY", "SELL"):
-        if not ml_pred.confirms(direction):
-            logger.info(
-                "ML contradicts technical signal (%s vs ML=%s) → forcing WAIT",
-                direction, ml_pred.direction
-            )
-            direction = "WAIT"
-            confidence = 0.0
+        # If ML is available and actively contradicts, downgrade to WAIT
+        if ml_pred.available and ml_pred.models_agree and direction in ("BUY", "SELL"):
+            if not ml_pred.confirms(direction):
+                logger.info(
+                    "ML contradicts technical signal (%s vs ML=%s) → forcing WAIT",
+                    direction, ml_pred.direction
+                )
+                direction = "WAIT"
+                confidence = 0.0
 
     # ── Step 3: News pause override ───────────────────────────────────────
     is_paused = news_paused

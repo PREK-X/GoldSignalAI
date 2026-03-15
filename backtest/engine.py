@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from config import Config, PROP_FIRM_PROFILES
-from data.fetcher import get_candles
+from data.fetcher import get_candles, get_market_data
 from data.processor import process
 from analysis.indicators import calculate_all
 from analysis.sr_levels import detect_sr_levels
@@ -102,7 +102,7 @@ class BacktestConfig:
     use_ml: bool = True
 
     # Limit order entry at S/R levels
-    use_limit_orders: bool = True
+    use_limit_orders: bool = False
     limit_max_distance_pips: float = 50.0  # max distance from current price to S/R
     limit_sl_pips: float = 60.0            # tighter SL when entering at S/R
     limit_expiry_bars: int = 8             # cancel pending order after N bars (2 hours)
@@ -958,24 +958,21 @@ def _fetch_historical_data(
     cfg: BacktestConfig,
 ) -> tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     """
-    Fetch M15 + H1 data separately, respecting yfinance hard limits.
+    Fetch M15 + H1 data using the full source hierarchy (Polygon → MT5 → yfinance).
 
-    yfinance limits:
-      15m → last 60 days only
-      1h  → last 730 days (~2 years)
-
-    Returns:
-        (m15_df, h1_df) — either may be None on failure.
-        H1 data covers ~1 year for proper indicator warm-up.
+    With Polygon as primary source we get 2+ years of M15 data
+    (~96,000 bars) instead of yfinance's 60-day limit.
     """
-    yf_symbol = Config.YFINANCE_SYMBOL  # "GC=F"
+    print("\n[Backtest] Fetching dual-timeframe data via Polygon (2 years)...")
+    print("[Backtest]   M15: ~96,000 bars (2 years)")
+    print("[Backtest]   H1 : ~17,500 bars (2 years)\n")
 
-    print("\n[Backtest] Fetching dual-timeframe data...")
-    print("[Backtest]   M15: last 59 days (yfinance hard limit)")
-    print("[Backtest]   H1 : last 365 days (separate fetch for proper indicators)\n")
+    # 2 years at 15-min bars: 24h × 4 bars/h × 365 days × 2 years ≈ 70,080
+    # Add 40% buffer for weekends/holidays
+    m15_df = get_market_data("XAUUSD", "M15", bars=96000)
 
-    m15_df = _yf_fetch(yf_symbol, "15m", 59, "M15")
-    h1_df = _yf_fetch(yf_symbol, "1h", 365, "H1")
+    # 2 years at 1-hour bars: 24h × 365 days × 2 years ≈ 17,520
+    h1_df = get_market_data("XAUUSD", "H1", bars=24000)
 
     return m15_df, h1_df
 
@@ -1079,7 +1076,7 @@ def run_backtest(
     ml_available = False
     ml_predict_fn = None
 
-    if cfg.use_ml:
+    if cfg.use_ml and Config.USE_ML_FILTER:
         ml_available = _train_ml_for_backtest(m15_processed, h1_processed)
         if ml_available:
             from ml.predictor import predict as ml_predict
@@ -1109,9 +1106,14 @@ def run_backtest(
     limit_orders_expired = 0   # count of limit orders expired
     limit_no_sr = 0            # count of signals skipped (no S/R within range)
 
-    # Circuit breaker state: pause after 3 consecutive losses in one day
+    # Daily circuit breaker: pause rest of day after 3 consecutive losses
     consecutive_losses = 0
     paused_until_day: Optional[str] = None  # YYYY-MM-DD — skip rest of this day
+
+    # Weekly circuit breaker: pause rest of week after 5 losses in 7-day window
+    weekly_cb_triggered = 0
+    weekly_loss_timestamps: list = []       # timestamps of recent losses (rolling 7 days)
+    weekly_paused_until_monday: Optional[str] = None  # ISO week start YYYY-MM-DD
 
     # Pending limit order (only one at a time, like open trades)
     pending_order: Optional[_PendingOrder] = None
@@ -1127,11 +1129,17 @@ def run_backtest(
             pct = (i - start_idx) / (total_bars - start_idx) * 100
             logger.info("Backtest progress: %.0f%% (%d/%d bars)", pct, i - start_idx, total_bars - start_idx)
 
-        # ── Reset circuit breaker on new day ──────────────────────────
+        # ── Reset daily circuit breaker on new day ────────────────────
         current_day = bar_time.strftime("%Y-%m-%d")
         if paused_until_day and current_day != paused_until_day:
             paused_until_day = None
             consecutive_losses = 0
+
+        # ── Reset weekly circuit breaker on Monday 00:00 UTC ──────────
+        # weekday(): Monday=0 … Sunday=6
+        monday_of_week = (bar_time - timedelta(days=bar_time.weekday())).strftime("%Y-%m-%d")
+        if weekly_paused_until_monday and monday_of_week != weekly_paused_until_monday:
+            weekly_paused_until_monday = None
 
         # ── Check pending limit order fill / expiry ───────────────────
         if pending_order is not None and open_trade is None:
@@ -1166,7 +1174,7 @@ def run_backtest(
             closed = _check_exit(open_trade, bar_high, bar_low, bar_time)
             if closed:
                 trades.append(open_trade)
-                # Track consecutive losses for circuit breaker
+                # Track consecutive losses for daily circuit breaker
                 if open_trade.is_winner:
                     consecutive_losses = 0
                 else:
@@ -1174,7 +1182,21 @@ def run_backtest(
                     if consecutive_losses >= 3 and paused_until_day is None:
                         paused_until_day = current_day
                         logger.debug(
-                            "Circuit breaker: 3 consecutive losses on %s — pausing",
+                            "Daily circuit breaker: 3 consecutive losses on %s — pausing day",
+                            current_day,
+                        )
+
+                    # Weekly circuit breaker: track losses in rolling 7-day window
+                    weekly_loss_timestamps.append(bar_time)
+                    cutoff = bar_time - timedelta(days=7)
+                    weekly_loss_timestamps = [t for t in weekly_loss_timestamps if t > cutoff]
+                    if (len(weekly_loss_timestamps) >= 5
+                            and weekly_paused_until_monday is None):
+                        weekly_paused_until_monday = monday_of_week
+                        weekly_cb_triggered += 1
+                        logger.debug(
+                            "Weekly circuit breaker: 5 losses in 7 days ending %s — "
+                            "pausing until next Monday",
                             current_day,
                         )
                 open_trade = None
@@ -1187,8 +1209,13 @@ def run_backtest(
         if open_trade is not None or pending_order is not None:
             continue
 
-        # ── Circuit breaker: skip if paused for today ──────────────────
+        # ── Daily circuit breaker: skip rest of today ─────────────────
         if paused_until_day == current_day:
+            circuit_breaker_paused += 1
+            continue
+
+        # ── Weekly circuit breaker: skip rest of this week ─────────────
+        if weekly_paused_until_monday == monday_of_week:
             circuit_breaker_paused += 1
             continue
 
@@ -1307,10 +1334,12 @@ def run_backtest(
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
-              f"| Circuit breaker skips: {circuit_breaker_paused} | Trades: {len(trades)}")
+              f"| Circuit breaker skips: {circuit_breaker_paused} "
+              f"| Weekly CB triggered: {weekly_cb_triggered} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
-              f"| Circuit breaker skips: {circuit_breaker_paused} | Trades taken: {len(trades)}")
+              f"| Circuit breaker skips: {circuit_breaker_paused} "
+              f"| Weekly CB triggered: {weekly_cb_triggered} | Trades taken: {len(trades)}")
     logger.info("Backtest complete: %d trades generated.", len(trades))
 
     # ── Step 4: Compute statistics ─────────────────────────────────────
