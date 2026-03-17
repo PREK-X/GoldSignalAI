@@ -182,7 +182,7 @@ def _process_signal(
         Updated signal_count
     """
     from signals.formatter import format_signal, format_signal_short
-    from alerts.telegram_bot import send_signal_sync
+    from alerts.discord_notifier import send_signal as discord_send_signal
     from alerts.chart_generator import generate_signal_chart
     from propfirm.tracker import TradeRecord
 
@@ -226,11 +226,11 @@ def _process_signal(
         except Exception as exc:
             logger.warning("Chart generation failed: %s", exc)
 
-        # Send Telegram alert
+        # Send Discord alert
         try:
-            send_signal_sync(formatted, chart_path)
+            discord_send_signal({"formatted_text": formatted})
         except Exception as exc:
-            logger.warning("Telegram alert failed: %s", exc)
+            logger.warning("Discord alert failed: %s", exc)
 
         # Record in compliance tracker
         try:
@@ -597,10 +597,12 @@ def main() -> None:
             sched.start()
             logger.info("Background scheduler started.")
 
-        # ── Start Telegram bot ─────────────────────────────────────────
-        telegram_thread = None
-        if not args.no_telegram:
-            telegram_thread = _start_telegram_thread()
+        # ── Discord startup message ────────────────────────────────────
+        try:
+            from alerts.discord_notifier import send_message as discord_send
+            discord_send("🟢 GoldSignalAI started successfully")
+        except Exception as exc:
+            logger.warning("Discord startup message failed: %s", exc)
 
         # ── Launch dashboard ───────────────────────────────────────────
         if args.dashboard:

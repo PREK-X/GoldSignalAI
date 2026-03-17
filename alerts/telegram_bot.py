@@ -303,7 +303,19 @@ def run_bot():
           - We pass close_loop=False so PTB doesn't try to close our loop
           - No signal.set_wakeup_fd() is called
         """
-        app = Application.builder().token(Config.TELEGRAM_BOT_TOKEN).build()
+        from telegram.request import HTTPXRequest
+
+        request = HTTPXRequest(
+            connect_timeout=30,
+            read_timeout=30,
+            write_timeout=30,
+        )
+        app = (
+            Application.builder()
+            .token(Config.TELEGRAM_BOT_TOKEN)
+            .request(request)
+            .build()
+        )
 
         app.add_handler(CommandHandler("start",  _cmd_start))
         app.add_handler(CommandHandler("help",   _cmd_help))
@@ -312,12 +324,24 @@ def run_bot():
         app.add_handler(CommandHandler("signal", _cmd_signal))
 
         logger.info("Telegram bot initialising…")
-        await app.initialize()
-        await app.updater.start_polling(
-            allowed_updates=Update.ALL_TYPES,
-            drop_pending_updates=True,
-        )
-        await app.start()
+
+        # Retry once on startup if connection fails
+        for attempt in range(2):
+            try:
+                await app.initialize()
+                await app.updater.start_polling(
+                    allowed_updates=Update.ALL_TYPES,
+                    drop_pending_updates=True,
+                )
+                await app.start()
+                break
+            except Exception as exc:
+                if attempt == 0:
+                    logger.warning("Telegram bot startup failed (%s) — retrying in 5s…", exc)
+                    await asyncio.sleep(5)
+                else:
+                    raise
+
         logger.info("Telegram bot polling for commands.")
 
         # Block indefinitely until the task is cancelled (by loop.stop()).
