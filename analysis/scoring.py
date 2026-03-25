@@ -257,7 +257,7 @@ def score_signal(
     # With 9 indicators (BBands removed), require >= 3 dominant; the session gate
     # does the heavy lifting since London=33.9% and NY=63.3%.
     MIN_ACTIVE = 4
-    MIN_DOMINANT = 3
+    MIN_DOMINANT = 4
     if active_count < MIN_ACTIVE:
         gates.append(
             f"Too few active indicators ({active_count}/{TOTAL_INDICATORS}) "
