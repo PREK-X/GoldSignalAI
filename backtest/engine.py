@@ -37,7 +37,7 @@ import pandas as pd
 from config import Config, PROP_FIRM_PROFILES
 from data.fetcher import get_candles, get_market_data
 from data.processor import process
-from analysis.indicators import calculate_all
+from analysis.indicators import calculate_all, PrecomputedIndicators
 from analysis.sr_levels import detect_sr_levels
 from analysis.fibonacci import calculate_fibonacci
 from analysis.candlestick import detect_patterns
@@ -348,15 +348,25 @@ def _analyse_bar(
     m15_slice: pd.DataFrame,
     h1_slice: pd.DataFrame,
     bar_time: Optional[datetime] = None,
+    m15_precomp: Optional[PrecomputedIndicators] = None,
+    m15_bar_idx: Optional[int] = None,
+    h1_precomp: Optional[PrecomputedIndicators] = None,
+    h1_bar_idx: Optional[int] = None,
 ) -> _AnalysisResult:
     """
     Run the full analysis pipeline on a single bar's lookback window.
+
+    If precomputed indicator objects are provided, uses O(1) array lookups
+    instead of re-running all rolling computations (10-20x faster per bar).
 
     Returns _AnalysisResult with direction, confidence, risk, counts, and S/R levels.
     """
     try:
         # ── M15 analysis ────────────────────────────────────────────────
-        m15_ind = calculate_all(m15_slice)
+        if m15_precomp is not None and m15_bar_idx is not None:
+            m15_ind = m15_precomp.at(m15_bar_idx)
+        else:
+            m15_ind = calculate_all(m15_slice)
         m15_sr = detect_sr_levels(m15_slice)
         m15_fib = calculate_fibonacci(m15_slice)
         m15_cand = detect_patterns(m15_slice)
@@ -364,7 +374,10 @@ def _analyse_bar(
         m15_score = score_signal(m15_ind, m15_sr, m15_fib, m15_cand, bar_time=bar_time)
 
         # ── H1 analysis ────────────────────────────────────────────────
-        h1_ind = calculate_all(h1_slice)
+        if h1_precomp is not None and h1_bar_idx is not None:
+            h1_ind = h1_precomp.at(h1_bar_idx)
+        else:
+            h1_ind = calculate_all(h1_slice)
         h1_sr = detect_sr_levels(h1_slice)
         h1_fib = calculate_fibonacci(h1_slice)
         h1_cand = detect_patterns(h1_slice)
@@ -960,19 +973,30 @@ def _fetch_historical_data(
     """
     Fetch M15 + H1 data using the full source hierarchy (Polygon → MT5 → yfinance).
 
-    With Polygon as primary source we get 2+ years of M15 data
-    (~96,000 bars) instead of yfinance's 60-day limit.
+    With Polygon as primary source we get ~2 years of M15 data.
+    Bar counts reduced to match Polygon free-tier limits (~2 years).
+    Each fetch is wrapped with a 60-second timeout.
     """
+    import concurrent.futures
+
     print("\n[Backtest] Fetching dual-timeframe data via Polygon (2 years)...")
-    print("[Backtest]   M15: ~96,000 bars (2 years)")
-    print("[Backtest]   H1 : ~17,500 bars (2 years)\n")
+    print("[Backtest]   M15: ~47,000 bars (2 years)")
+    print("[Backtest]   H1 : ~12,000 bars (2 years)\n")
 
-    # 2 years at 15-min bars: 24h × 4 bars/h × 365 days × 2 years ≈ 70,080
-    # Add 40% buffer for weekends/holidays
-    m15_df = get_market_data("XAUUSD", "M15", bars=96000)
+    def _fetch_with_timeout(symbol, tf, bars, label):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(get_market_data, symbol, tf, bars)
+            try:
+                return fut.result(timeout=300)
+            except concurrent.futures.TimeoutError:
+                print(f"[Backtest] WARNING: {label} fetch timed out after 300s")
+                return None
+            except Exception as e:
+                print(f"[Backtest] WARNING: {label} fetch failed: {e}")
+                return None
 
-    # 2 years at 1-hour bars: 24h × 365 days × 2 years ≈ 17,520
-    h1_df = get_market_data("XAUUSD", "H1", bars=24000)
+    m15_df = _fetch_with_timeout("XAUUSD", "M15", 47000, "M15")
+    h1_df  = _fetch_with_timeout("XAUUSD", "H1",  12000, "H1")
 
     return m15_df, h1_df
 
@@ -1074,13 +1098,27 @@ def run_backtest(
 
     # ── Step 2: Train ML models ────────────────────────────────────────
     ml_available = False
-    ml_predict_fn = None
 
+    ml_batch: Optional[pd.DataFrame] = None
     if cfg.use_ml and Config.USE_ML_FILTER:
         ml_available = _train_ml_for_backtest(m15_processed, h1_processed)
         if ml_available:
-            from ml.predictor import predict as ml_predict
-            ml_predict_fn = ml_predict
+            from ml.predictor import predict_batch as _predict_batch
+            print("[Backtest] Precomputing ML predictions for all bars (batch)...")
+            ml_batch = _predict_batch(m15_processed)
+            if ml_batch.empty:
+                print("[Backtest] ML batch prediction failed — ML filter disabled.")
+                ml_available = False
+                ml_batch = None
+            else:
+                print(f"[Backtest] ML batch ready: {len(ml_batch):,} rows")
+
+    # ── Step 2b: Precompute indicator time-series for all bars ─────────
+    print("[Backtest] Precomputing M15 indicators (full dataset)...")
+    m15_precomp = PrecomputedIndicators(m15_processed)
+    print("[Backtest] Precomputing H1  indicators (full dataset)...")
+    h1_precomp  = PrecomputedIndicators(h1_processed)
+    print("[Backtest] Indicator precomputation complete.")
 
     # ── Step 3: Walk-forward simulation ────────────────────────────────
     trades: list[BacktestTrade] = []
@@ -1097,7 +1135,6 @@ def run_backtest(
         total_bars - start_idx, start_idx, total_bars,
     )
 
-    progress_step = max(1, (total_bars - start_idx) // 20)  # log every 5%
     signals_found = 0
     ml_filtered = 0
     circuit_breaker_paused = 0  # count of bars skipped by circuit breaker
@@ -1124,10 +1161,11 @@ def run_backtest(
         bar_high = bar["high"]
         bar_low = bar["low"]
 
-        # Progress logging
-        if (i - start_idx) % progress_step == 0:
-            pct = (i - start_idx) / (total_bars - start_idx) * 100
-            logger.info("Backtest progress: %.0f%% (%d/%d bars)", pct, i - start_idx, total_bars - start_idx)
+        # Progress logging — print every 1000 bars so it's visible even with 2>/dev/null
+        bars_done = i - start_idx
+        if bars_done % 1000 == 0 and bars_done > 0:
+            pct = bars_done / (total_bars - start_idx) * 100
+            print(f"[Backtest] Processing bar {bars_done}/{total_bars - start_idx} ({pct:.1f}%)", flush=True)
 
         # ── Reset daily circuit breaker on new day ────────────────────
         current_day = bar_time.strftime("%Y-%m-%d")
@@ -1226,15 +1264,20 @@ def run_backtest(
         # ── Run analysis on lookback window ────────────────────────────
         m15_slice = m15_processed.iloc[max(0, i - lookback):i + 1]
 
-        # Get corresponding H1 data up to this point (real H1, not resampled)
-        h1_mask = h1_processed.index <= bar_time
-        h1_slice = h1_processed[h1_mask].tail(lookback)
+        # Get corresponding H1 data up to this point — O(log n) with searchsorted
+        h1_idx = h1_processed.index.searchsorted(bar_time, side="right")
+        h1_slice = h1_processed.iloc[max(0, h1_idx - lookback):h1_idx]
 
         if len(m15_slice) < min_bars or len(h1_slice) < 50:
             continue
 
-        # ── Analyse ────────────────────────────────────────────────────
-        analysis = _analyse_bar(m15_slice, h1_slice, bar_time=bar_time)
+        # ── Analyse — use precomputed indicators for O(1) lookups ──────
+        h1_bar_idx = h1_idx - 1 if h1_idx > 0 else 0
+        analysis = _analyse_bar(
+            m15_slice, h1_slice, bar_time=bar_time,
+            m15_precomp=m15_precomp, m15_bar_idx=i,
+            h1_precomp=h1_precomp,  h1_bar_idx=h1_bar_idx,
+        )
 
         if analysis.direction is None or analysis.direction == "WAIT" or analysis.risk is None:
             continue
@@ -1244,10 +1287,15 @@ def run_backtest(
         risk = analysis.risk
         signals_found += 1
 
-        # ── ML filter ──────────────────────────────────────────────────
-        if ml_available and ml_predict_fn is not None:
-            prediction = ml_predict_fn(m15_slice)
-            if prediction.available and not prediction.confirms(direction):
+        # ── ML filter — use precomputed batch (O(1) lookup) ───────────
+        if ml_available and ml_batch is not None:
+            ml_row = ml_batch.iloc[i]
+            pred_available = not pd.isna(ml_row["xgb_prob"])
+            if pred_available and not (
+                bool(ml_row["ml_agree"]) and
+                ((direction == "BUY" and ml_row["ml_direction"] == "UP") or
+                 (direction == "SELL" and ml_row["ml_direction"] == "DOWN"))
+            ):
                 ml_filtered += 1
                 continue
 

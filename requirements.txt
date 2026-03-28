@@ -4,7 +4,6 @@
 # ─────────────────────────────────────────────────────────
 
 # ── Broker / Market Data ──────────────────────────────────
-MetaTrader5>=5.0.45          # Live MT5 connection (Windows-compatible layer via wine on Linux)
 yfinance>=0.2.36             # Fallback data source
 
 # ── Data Processing ───────────────────────────────────────

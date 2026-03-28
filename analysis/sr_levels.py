@@ -183,6 +183,85 @@ def _cluster_pivots(
 # MAIN S/R DETECTION FUNCTION
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _resample_to_h4(df: pd.DataFrame, m15_bars_per_h4: int = 16) -> pd.DataFrame:
+    """
+    Resample M15 data to H4 equivalent by taking every Nth bar group.
+    Returns a DataFrame with OHLCV columns at H4 resolution.
+    """
+    n = len(df)
+    if n < m15_bars_per_h4:
+        return df.copy()
+
+    # Group into chunks of m15_bars_per_h4 bars
+    # Trim the beginning so the last group aligns with the most recent bar
+    trim = n % m15_bars_per_h4
+    trimmed = df.iloc[trim:].copy()
+    groups = len(trimmed) // m15_bars_per_h4
+
+    records = []
+    for i in range(groups):
+        chunk = trimmed.iloc[i * m15_bars_per_h4 : (i + 1) * m15_bars_per_h4]
+        records.append({
+            "open":   chunk["open"].iloc[0],
+            "high":   chunk["high"].max(),
+            "low":    chunk["low"].min(),
+            "close":  chunk["close"].iloc[-1],
+            "volume": chunk["volume"].sum() if "volume" in chunk.columns else 0,
+        })
+
+    return pd.DataFrame(records)
+
+
+def _daily_pivot_zones(
+    df: pd.DataFrame,
+    current_price: float,
+    tolerance_pips: float,
+) -> list[SRZone]:
+    """
+    Calculate daily pivot points from the most recent complete daily bar.
+
+    Pivot = (High + Low + Close) / 3
+    R1 = 2 × Pivot − Low
+    S1 = 2 × Pivot − High
+
+    For M15 data, a "day" ≈ 96 bars. We use the last complete 96-bar block.
+    """
+    bars_per_day = 96  # 24h × 4 bars/hour
+    if len(df) < bars_per_day + 1:
+        return []
+
+    # Use the previous complete day (skip the current incomplete day)
+    day_data = df.iloc[-(bars_per_day * 2):-bars_per_day]
+    if len(day_data) < bars_per_day:
+        day_data = df.iloc[:-(bars_per_day)]
+    if len(day_data) == 0:
+        return []
+
+    h = float(day_data["high"].max())
+    l = float(day_data["low"].min())
+    c = float(day_data["close"].iloc[-1])
+
+    pivot = (h + l + c) / 3
+    r1 = 2 * pivot - l
+    s1 = 2 * pivot - h
+
+    zones = []
+    for level, label in [(pivot, "Daily Pivot"), (r1, "Daily R1"), (s1, "Daily S1")]:
+        pips_away = abs(level - current_price) / Config.PIP_SIZE
+        pct_away  = abs(level - current_price) / current_price * 100 if current_price > 0 else 0
+        zone_type = "support" if level < current_price else "resistance"
+        zones.append(SRZone(
+            price=level,
+            zone_type=zone_type,
+            strength=3,  # Pivot points are inherently strong institutional levels
+            strong=True,
+            pips_from_price=pips_away,
+            pct_from_price=pct_away,
+        ))
+
+    return zones
+
+
 def detect_sr_levels(
     df:          pd.DataFrame,
     lookback:    int   = Config.SR_LOOKBACK,
@@ -193,6 +272,12 @@ def detect_sr_levels(
 ) -> SRLevels:
     """
     Detect support and resistance zones from recent price history.
+
+    Upgraded approach:
+      - Resample M15 bars to H4 equivalent (every 16 bars) for stronger
+        institutional-grade pivot detection
+      - Add daily pivot points (Pivot, R1, S1) as strong zones
+      - Merge all zones with standard clustering
 
     Args:
         df:             Processed OHLCV DataFrame
@@ -218,13 +303,25 @@ def detect_sr_levels(
     current_price = float(data["close"].iloc[-1])
 
     # Convert tolerance from pips to price units
-    # Gold: 1 pip = Config.PIP_SIZE (0.1) → e.g. 5 pips = 0.5 price units
     tolerance_price = tolerance_pips * Config.PIP_SIZE
 
-    # ── Step 1: Detect pivot highs and lows ──────────────────────────────
-    pivot_highs, pivot_lows = _find_pivots(data, left=pivot_left, right=pivot_right)
+    # ── Step 1a: Detect pivots on H4 resampled data (institutional levels) ──
+    h4_data = _resample_to_h4(data, m15_bars_per_h4=16)
+    h4_pivot_left  = max(2, pivot_left // 3)
+    h4_pivot_right = max(2, pivot_right // 3)
 
-    if not pivot_highs and not pivot_lows:
+    if len(h4_data) >= h4_pivot_left + h4_pivot_right + 5:
+        h4_highs, h4_lows = _find_pivots(h4_data, left=h4_pivot_left, right=h4_pivot_right)
+    else:
+        h4_highs, h4_lows = [], []
+
+    # ── Step 1b: Also detect pivots on M15 data (fine-grained levels) ────
+    m15_highs, m15_lows = _find_pivots(data, left=pivot_left, right=pivot_right)
+
+    # Combine M15 and H4 pivots (H4 pivots are weighted by adding them twice)
+    all_pivots = m15_highs + m15_lows + h4_highs * 2 + h4_lows * 2
+
+    if not all_pivots:
         logger.warning("SR: No pivots detected in %d candles.", len(data))
         return SRLevels(
             zones=[], nearest_support=None, nearest_resistance=None,
@@ -232,7 +329,6 @@ def detect_sr_levels(
         )
 
     # ── Step 2: Cluster into zones ────────────────────────────────────────
-    all_pivots = pivot_highs + pivot_lows
     raw_zones  = _cluster_pivots(all_pivots, tolerance=tolerance_price)
 
     # ── Step 3: Build SRZone objects ─────────────────────────────────────
@@ -252,6 +348,10 @@ def detect_sr_levels(
             pct_from_price=pct_away,
         ))
 
+    # ── Step 3b: Add daily pivot point zones ──────────────────────────────
+    pivot_zones = _daily_pivot_zones(df, current_price, tolerance_pips)
+    zones.extend(pivot_zones)
+
     # Sort by price ascending
     zones.sort(key=lambda z: z.price)
 
@@ -262,8 +362,6 @@ def detect_sr_levels(
     all_supports    = [z for z in zones if z.zone_type == "support"]
     all_resistances = [z for z in zones if z.zone_type == "resistance"]
 
-    # Prefer nearest STRONG zone; fall back to nearest weak zone so that
-    # nearest_support/nearest_resistance are never None when zones exist.
     nearest_support = (
         min(strong_supports,    key=lambda z: z.pips_from_price) if strong_supports
         else min(all_supports,  key=lambda z: z.pips_from_price) if all_supports
@@ -276,7 +374,6 @@ def detect_sr_levels(
     )
 
     # ── Step 5: At-level detection ────────────────────────────────────────
-    # "At" = within tolerance_pips of any strong zone
     at_support    = any(
         z.pips_from_price <= tolerance_pips
         for z in strong_supports
@@ -297,7 +394,7 @@ def detect_sr_levels(
 
     n_strong = sum(1 for z in zones if z.strong)
     logger.info(
-        "SR detected %d zones (%d strong) | %s",
+        "SR detected %d zones (%d strong, incl H4+pivots) | %s",
         len(zones), n_strong, sr.summary()
     )
     return sr
