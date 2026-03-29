@@ -5,7 +5,7 @@ The Signal Scoring Engine — combines all analysis layers into a single
 confidence score and BUY / SELL / WAIT decision.
 
 Scoring methodology:
-  13 indicators are monitored. Each votes +1 (bullish), -1 (bearish),
+  10 indicators are monitored. Each votes +1 (bullish), -1 (bearish),
   or 0 (neutral).
 
   Confidence % = (dominant_count / active_count) × 100
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 # SCORING CONSTANTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-TOTAL_INDICATORS = Config.TOTAL_INDICATORS    # 12 voted indicators (BBands ML-only)
+TOTAL_INDICATORS = Config.TOTAL_INDICATORS    # 9 (BBands removed)
 MIN_CONFIDENCE   = Config.MIN_CONFIDENCE_PCT  # 65
 MAX_CONFIDENCE   = Config.MAX_CONFIDENCE_PCT  # 75 — above this = over-consensus, lagging
 
@@ -253,10 +253,11 @@ def score_signal(
             )
 
     # Gate 1: Minimum active and dominant counts.
-    # With 12 voted indicators (BBands ML-only), require >= 4 dominant;
-    # the session gate does the heavy lifting since London=33.9% and NY=63.3%.
+    # Diagnostic (10-indicator system): 4 dominant → 56.8%, 3 dominant → 44.2%.
+    # With 9 indicators (BBands removed), require >= 3 dominant; the session gate
+    # does the heavy lifting since London=33.9% and NY=63.3%.
     MIN_ACTIVE = 4
-    MIN_DOMINANT = 4
+    MIN_DOMINANT = 3
     if active_count < MIN_ACTIVE:
         gates.append(
             f"Too few active indicators ({active_count}/{TOTAL_INDICATORS}) "

@@ -42,6 +42,8 @@ def run_health_check() -> bool:
         ("Environment (.env)", _check_env),
         ("Database", _check_database),
         ("Data source", _check_data_source),
+        ("Macro data (DXY/VIX/US10Y)", _check_macro_data),
+        ("HMM regime detector", _check_hmmlearn),
         ("Config validation", _check_config),
     ]
 
@@ -131,6 +133,28 @@ def _check_data_source() -> tuple[bool, str]:
 
     primary = sources[0]
     return True, f"Primary: {primary} ({len(sources)} sources available)"
+
+
+def _check_macro_data() -> tuple[bool, str]:
+    """Check if macro data (DXY, VIX, US10Y) is cached."""
+    try:
+        from data.macro_fetcher import is_macro_data_available
+        return is_macro_data_available()
+    except ImportError:
+        return False, "macro_fetcher module not found"
+    except Exception as exc:
+        return False, f"Error: {exc}"
+
+
+def _check_hmmlearn() -> tuple[bool, str]:
+    """Check if hmmlearn is installed and GaussianHMM can be initialized."""
+    try:
+        from analysis.regime_filter import is_hmmlearn_available
+        return is_hmmlearn_available()
+    except ImportError:
+        return False, "regime_filter module not found"
+    except Exception as exc:
+        return False, f"Error: {exc}"
 
 
 def _check_config() -> tuple[bool, str]:

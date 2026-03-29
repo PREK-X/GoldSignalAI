@@ -146,6 +146,10 @@ class BacktestTrade:
     tp1_pnl_pips: float = 0.0
     tp1_pnl_usd: float = 0.0
 
+    # Regime state at entry
+    regime_state: int = -1       # 0=TRENDING, 1=RANGING, 2=CRISIS, -1=unknown
+    regime_label: str = ""
+
     def to_dict(self) -> dict:
         """Convert to dict for CSV/DataFrame export."""
         return {
@@ -167,6 +171,7 @@ class BacktestTrade:
             "pnl_usd": round(self.pnl_usd, 2),
             "is_winner": self.is_winner,
             "tp1_hit": self.tp1_hit,
+            "regime": self.regime_label,
         }
 
 
@@ -258,6 +263,10 @@ class BacktestResult:
     equity_curve: list[float] = field(default_factory=list)
     equity_dates: list[datetime] = field(default_factory=list)
 
+    # Regime distribution (% of H1 bars in each state)
+    regime_distribution: dict = field(default_factory=dict)
+    regime_filtered: int = 0   # signals suppressed by CRISIS regime
+
     def summary(self) -> str:
         """Human-readable summary string."""
         lines = [
@@ -282,8 +291,15 @@ class BacktestResult:
             f" Max Drawdown:     {self.max_drawdown_pct:.2f}% (${self.max_drawdown_usd:,.2f})",
             f" Best Streak:      {self.best_streak} wins",
             f" Worst Streak:     {self.worst_streak} losses",
-            f"{'═' * 50}",
         ]
+        if self.regime_distribution:
+            lines.append(f"{'─' * 50}")
+            lines.append(f" Regime Distribution (H1 bars):")
+            for label, pct in self.regime_distribution.items():
+                lines.append(f"   {label:12s} {pct:5.1f}%")
+            if self.regime_filtered > 0:
+                lines.append(f"   Signals filtered by CRISIS: {self.regime_filtered}")
+        lines.append(f"{'═' * 50}")
         return "\n".join(line for line in lines if line)
 
     def trades_to_dataframe(self) -> pd.DataFrame:
@@ -1096,6 +1112,17 @@ def run_backtest(
 
     print(f"[Backtest] Processed: M15={len(m15_processed):,} bars, H1={len(h1_processed):,} bars")
 
+    # ── Step 1b: Fetch & cache macro data (DXY, VIX, US10Y) ───────────
+    try:
+        from data.macro_fetcher import fetch_and_cache_macro
+        print("[Backtest] Fetching macro data (DXY, VIX, US10Y)...")
+        macro_result = fetch_and_cache_macro()
+        for name, count in macro_result.items():
+            print(f"[Backtest]   {name}: {count} daily bars cached")
+    except Exception as exc:
+        print(f"[Backtest] WARNING: Macro data fetch failed: {exc}")
+        print("[Backtest] ML features will not include macro context.")
+
     # ── Step 2: Train ML models ────────────────────────────────────────
     ml_available = False
 
@@ -1120,6 +1147,36 @@ def run_backtest(
     h1_precomp  = PrecomputedIndicators(h1_processed)
     print("[Backtest] Indicator precomputation complete.")
 
+    # ── Step 2c: Train HMM regime detector on first 30% of H1 bars ────
+    h1_regime_states: Optional[np.ndarray] = None
+    regime_labels_map = {0: "TRENDING", 1: "RANGING", 2: "CRISIS"}
+    regime_multipliers = {0: 1.0, 1: 0.5, 2: 0.0}
+    try:
+        from analysis.regime_filter import RegimeDetector
+        warmup_end = int(len(h1_processed) * 0.30)
+        if warmup_end >= 200:
+            print(f"[Backtest] Training HMM regime detector on first {warmup_end:,} H1 bars "
+                  f"({warmup_end / len(h1_processed) * 100:.0f}% warm-up)...")
+            hmm_detector = RegimeDetector()
+            hmm_ok = hmm_detector.fit(h1_processed.iloc[:warmup_end])
+            if hmm_ok:
+                h1_regime_states = hmm_detector.predict_all(h1_processed)
+                # Count distribution
+                unique, counts = np.unique(h1_regime_states, return_counts=True)
+                dist = {regime_labels_map.get(int(s), f"S{s}"): int(c) for s, c in zip(unique, counts)}
+                total_h1 = len(h1_regime_states)
+                print("[Backtest] HMM regime distribution:")
+                for label, c in dist.items():
+                    print(f"[Backtest]   {label:12s} {c:6,} bars ({c / total_h1 * 100:.1f}%)")
+            else:
+                print("[Backtest] HMM training failed — regime filter disabled.")
+        else:
+            print(f"[Backtest] Not enough H1 bars for HMM warm-up ({warmup_end} < 200) — regime filter disabled.")
+    except ImportError:
+        print("[Backtest] hmmlearn not installed — regime filter disabled.")
+    except Exception as exc:
+        print(f"[Backtest] HMM regime filter failed: {exc}")
+
     # ── Step 3: Walk-forward simulation ────────────────────────────────
     trades: list[BacktestTrade] = []
     open_trade: Optional[BacktestTrade] = None
@@ -1137,6 +1194,7 @@ def run_backtest(
 
     signals_found = 0
     ml_filtered = 0
+    regime_filtered = 0  # count of signals suppressed by CRISIS regime
     circuit_breaker_paused = 0  # count of bars skipped by circuit breaker
     limit_orders_placed = 0    # count of limit orders placed
     limit_orders_filled = 0    # count of limit orders filled
@@ -1299,6 +1357,23 @@ def run_backtest(
                 ml_filtered += 1
                 continue
 
+        # ── HMM regime filter ─────────────────────────────────────────
+        bar_regime_state = 1  # default RANGING
+        bar_regime_label = "RANGING"
+        bar_regime_mult = 1.0
+        if h1_regime_states is not None:
+            # Find the H1 bar index corresponding to this M15 bar
+            h1_regime_idx = h1_processed.index.searchsorted(bar_time, side="right") - 1
+            h1_regime_idx = max(0, min(h1_regime_idx, len(h1_regime_states) - 1))
+            bar_regime_state = int(h1_regime_states[h1_regime_idx])
+            bar_regime_label = regime_labels_map.get(bar_regime_state, f"S{bar_regime_state}")
+            bar_regime_mult = regime_multipliers.get(bar_regime_state, 1.0)
+
+            if bar_regime_mult == 0.0:
+                # CRISIS regime — suppress signal
+                regime_filtered += 1
+                continue
+
         # ── Calculate lot size ─────────────────────────────────────────
         current_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
         pip_value = Config.GOLD_PIP_VALUE
@@ -1321,6 +1396,9 @@ def run_backtest(
             risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
             lot_size = risk_usd / (sl_for_lot * pip_value) if sl_for_lot > 0 else 0.01
             lot_size = round(max(0.01, lot_size), 2)
+            # Apply regime multiplier
+            if bar_regime_mult < 1.0:
+                lot_size = round(max(0.01, lot_size * bar_regime_mult), 2)
 
             pending.lot_size = lot_size
             pending.confidence_pct = confidence
@@ -1341,6 +1419,9 @@ def run_backtest(
             risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
             lot_size = risk_usd / (risk.sl_pips * pip_value) if risk.sl_pips > 0 else 0.01
             lot_size = round(max(0.01, lot_size), 2)
+            # Apply regime multiplier
+            if bar_regime_mult < 1.0:
+                lot_size = round(max(0.01, lot_size * bar_regime_mult), 2)
 
             open_trade = BacktestTrade(
                 entry_time=bar_time,
@@ -1354,6 +1435,8 @@ def run_backtest(
                 sl_pips=risk.sl_pips,
                 tp1_pips=risk.tp1_pips,
                 tp2_pips=risk.tp2_pips,
+                regime_state=bar_regime_state,
+                regime_label=bar_regime_label,
             )
             bars_since_last_trade = 0
 
@@ -1380,18 +1463,30 @@ def run_backtest(
 
     if cfg.use_limit_orders:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| Regime filtered: {regime_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
               f"| Circuit breaker skips: {circuit_breaker_paused} "
               f"| Weekly CB triggered: {weekly_cb_triggered} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| Regime filtered: {regime_filtered} "
               f"| Circuit breaker skips: {circuit_breaker_paused} "
               f"| Weekly CB triggered: {weekly_cb_triggered} | Trades taken: {len(trades)}")
     logger.info("Backtest complete: %d trades generated.", len(trades))
 
     # ── Step 4: Compute statistics ─────────────────────────────────────
     result = _compute_statistics(trades, cfg)
+
+    # ── Step 4b: Add regime distribution to result ─────────────────────
+    if h1_regime_states is not None:
+        total_h1 = len(h1_regime_states)
+        unique, counts = np.unique(h1_regime_states, return_counts=True)
+        result.regime_distribution = {
+            regime_labels_map.get(int(s), f"S{s}"): round(int(c) / total_h1 * 100, 1)
+            for s, c in zip(unique, counts)
+        }
+        result.regime_filtered = regime_filtered
 
     # ── Step 5: Prop firm simulations ──────────────────────────────────
     if cfg.simulate_prop_firm:

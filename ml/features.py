@@ -359,6 +359,109 @@ def _add_enhanced_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MACRO FEATURES (DXY, VIX, US10Y — independent of gold price)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _add_macro_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Merge daily macro context (DXY, VIX, US10Y) into the feature matrix.
+
+    These are *independent* features — not derived from gold price — which
+    is critical for ML edge. DXY has ~-0.80 correlation with gold.
+
+    The macro series is daily, so we align by date: each intraday bar
+    gets the most recent daily macro values (as-of join).
+
+    Features added:
+      dxy_1d_return, dxy_5d_return, dxy_trend_flag,
+      vix_level, vix_1d_change, vix_regime,
+      us10y_level, us10y_1d_change
+    """
+    try:
+        from data.macro_fetcher import get_macro_series
+
+        # Get macro series covering the DataFrame's date range
+        start = df.index.min().strftime("%Y-%m-%d") if hasattr(df.index.min(), "strftime") else None
+        end = df.index.max().strftime("%Y-%m-%d") if hasattr(df.index.max(), "strftime") else None
+        macro = get_macro_series(start_date=start, end_date=end)
+
+        if macro.empty:
+            logger.warning("No macro data available — macro features will be NaN")
+            for col in ("dxy_1d_return", "dxy_5d_return", "dxy_trend_flag",
+                         "vix_level", "vix_1d_change", "vix_regime",
+                         "us10y_level", "us10y_1d_change"):
+                df[col] = np.nan
+            return df
+
+        # Select only the feature columns we want
+        macro_cols = [
+            "dxy_1d_return", "dxy_5d_return", "dxy_trend_flag",
+            "vix_1d_change", "vix_regime",
+            "us10y_1d_change",
+        ]
+        # Use raw values for level features
+        level_cols = {"vix": "vix_level", "us10y": "us10y_level"}
+
+        # Build the macro feature DataFrame
+        macro_feat = pd.DataFrame(index=macro.index)
+        for col in macro_cols:
+            if col in macro.columns:
+                macro_feat[col] = macro[col]
+        for raw_col, feat_col in level_cols.items():
+            if raw_col in macro.columns:
+                macro_feat[feat_col] = macro[raw_col]
+
+        # As-of merge: for each intraday bar, get the most recent daily macro row
+        # Normalise the bar index to date for merging
+        bar_dates = df.index.normalize()
+        macro_feat_daily = macro_feat.copy()
+        macro_feat_daily.index = macro_feat_daily.index.normalize()
+
+        # Use merge_asof for efficient alignment
+        df_reset = df.reset_index()
+        df_reset["_merge_date"] = bar_dates
+
+        macro_reset = macro_feat_daily.reset_index().rename(columns={"index": "_merge_date"})
+        # Drop duplicate dates (keep last)
+        macro_reset = macro_reset.drop_duplicates(subset="_merge_date", keep="last")
+        macro_reset = macro_reset.sort_values("_merge_date")
+
+        merged = pd.merge_asof(
+            df_reset.sort_values("_merge_date"),
+            macro_reset,
+            on="_merge_date",
+            direction="backward",
+        )
+
+        # Restore original index
+        merged = merged.set_index(df.index.name or "index" if df.index.name else df_reset.columns[0])
+        merged = merged.sort_index()
+
+        # Copy macro features back to df
+        for col in macro_feat.columns:
+            if col in merged.columns:
+                df[col] = merged[col].values
+
+        logger.info("Added %d macro features (DXY/VIX/US10Y)", len(macro_feat.columns))
+
+    except ImportError:
+        logger.warning("macro_fetcher not available — skipping macro features")
+        for col in ("dxy_1d_return", "dxy_5d_return", "dxy_trend_flag",
+                     "vix_level", "vix_1d_change", "vix_regime",
+                     "us10y_level", "us10y_1d_change"):
+            df[col] = np.nan
+    except Exception as exc:
+        logger.warning("Failed to add macro features: %s — columns will be NaN", exc)
+        for col in ("dxy_1d_return", "dxy_5d_return", "dxy_trend_flag",
+                     "vix_level", "vix_1d_change", "vix_regime",
+                     "us10y_level", "us10y_1d_change"):
+            if col not in df.columns:
+                df[col] = np.nan
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TARGET VARIABLE
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -433,6 +536,8 @@ def build_features(
     feat = _add_sr_features(feat)
     feat = _add_candle_features(feat)
     feat = _add_enhanced_features(feat)
+
+    feat = _add_macro_features(feat)
 
     if include_target:
         feat = _add_target(feat)

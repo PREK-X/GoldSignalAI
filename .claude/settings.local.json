@@ -6,7 +6,10 @@
       "Bash(venv/bin/python -m backtest.report_generator 2>&1)",
       "Bash(venv/bin/python -c \"\nfrom data.fetcher import get_candles\nfrom data.processor import process\n\ndf = get_candles\\('M15', n_candles=300, symbol='XAUUSD'\\)\nprint\\('Raw fetch shape:', df.shape if df is not None else None\\)\nprint\\('Columns:', list\\(df.columns\\) if df is not None else None\\)\nif df is not None:\n    print\\('Last 3 rows:'\\)\n    print\\(df.tail\\(3\\)\\)\n    print\\('Dtypes:', df.dtypes.to_dict\\(\\)\\)\n\" 2>&1 | grep -v \"MetaTrader5\\\\|yfinance fallback\")",
       "Bash(venv/bin/python -c \"\nfrom data.fetcher import get_candles\nfrom data.processor import process\n\nraw = get_candles\\('M15', n_candles=300, symbol='XAUUSD'\\)\ndf = process\\(raw, timeframe='M15', label='TEST'\\)\nprint\\('Processed shape:', df.shape if df is not None else None\\)\nif df is not None:\n    print\\('Columns:', list\\(df.columns\\)\\)\n    print\\('Last 3 rows:'\\)\n    print\\(df.tail\\(3\\).to_string\\(\\)\\)\n\" 2>&1 | grep -v \"MetaTrader5\\\\|yfinance fallback\")",
-      "Bash(venv/bin/python -m backtest.diagnostic 2>&1 | grep -v \"^Fib:\" | grep -v \"MetaTrader\")"
+      "Bash(venv/bin/python -m backtest.diagnostic 2>&1 | grep -v \"^Fib:\" | grep -v \"MetaTrader\")",
+      "Bash(git stash:*)",
+      "Bash(venv/bin/python -m pytest tests/test_news_fetcher.py::test_parse_ff_datetime tests/test_tracker.py::test_daily_loss_stops_trading -v)",
+      "Bash(venv/bin/python -m pytest tests/ -v --tb=no -q)"
     ]
   }
 }

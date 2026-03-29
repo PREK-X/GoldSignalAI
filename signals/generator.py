@@ -184,13 +184,29 @@ def generate_signal(
                 direction = "WAIT"
                 confidence = 0.0
 
-    # ── Step 3: News pause override ───────────────────────────────────────
+    # ── Step 3: HMM regime filter ───────────────────────────────────────
+    regime_label = None
+    regime_multiplier = 1.0
+    if direction in ("BUY", "SELL") and mtf.h1.df is not None:
+        try:
+            from analysis.regime_filter import get_current_regime
+            _state, regime_label, regime_multiplier = get_current_regime(mtf.h1.df)
+            if regime_multiplier == 0.0:
+                logger.info("CRISIS regime detected — suppressing %s signal", direction)
+                direction = "WAIT"
+                confidence = 0.0
+            elif regime_multiplier < 1.0:
+                logger.info("RANGING regime — position size will be scaled to %.1fx", regime_multiplier)
+        except Exception as exc:
+            logger.warning("Regime filter failed (continuing without): %s", exc)
+
+    # ── Step 4: News pause override ───────────────────────────────────────
     is_paused = news_paused
     if is_paused:
         direction = "WAIT"
         confidence = 0.0
 
-    # ── Step 4: Risk calculation (only for actionable signals) ────────────
+    # ── Step 5: Risk calculation (only for actionable signals) ────────────
     risk = None
     if direction in ("BUY", "SELL") and mtf.m15.indicators:
         atr_val = mtf.m15.indicators.atr.value
@@ -201,16 +217,23 @@ def generate_signal(
             atr_value=atr_val,
             sr_levels=sr,
         )
+        # Apply regime multiplier to position size
+        if risk is not None and regime_multiplier < 1.0:
+            risk.suggested_lot = round(max(0.01, risk.suggested_lot * regime_multiplier), 2)
 
-    # ── Step 5: Build reason string ───────────────────────────────────────
+    # ── Step 6: Build reason string ───────────────────────────────────────
     if is_paused:
         reason = f"WAIT — {pause_reason}"
+    elif direction == "WAIT" and regime_label == "CRISIS":
+        reason = f"WAIT — CRISIS regime detected (high volatility)"
     elif direction == "WAIT" and mtf.direction in ("BUY", "SELL"):
         reason = f"WAIT — ML contradicts ({ml_pred.direction} vs {mtf.direction})"
     else:
         reason = mtf.reason
+        if regime_label and regime_multiplier < 1.0:
+            reason += f" [RANGING regime: {regime_multiplier:.0%} size]"
 
-    # ── Step 6: Package result ────────────────────────────────────────────
+    # ── Step 7: Package result ────────────────────────────────────────────
     signal = TradingSignal(
         direction=direction,
         confidence_pct=confidence,

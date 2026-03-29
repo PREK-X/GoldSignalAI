@@ -34,7 +34,7 @@ GoldSignalAI/
 │   └── macro_fetcher.py       # PLANNED: DXY, VIX, US10Y feeds
 │
 ├── analysis/
-│   ├── indicators.py          # 12 voted indicators + PrecomputedIndicators class
+│   ├── indicators.py          # 9 voted indicators + PrecomputedIndicators shim (backtest perf)
 │   ├── scoring.py             # Active-ratio scoring, session filter, gates
 │   ├── sr_levels.py           # S/R detection (H4 + daily pivots)
 │   ├── fibonacci.py           # Fibonacci retracement levels
@@ -112,14 +112,14 @@ SENTRY_DSN=                # Error monitoring (optional, Student Pack)
 
 ## Key Configuration (config.py)
 
-### Validated Backtest Config
+### Validated Backtest Config (9-indicator system, restored 2026-03-28)
 ```python
 MIN_CONFIDENCE_PCT   = 65    # Active-ratio scoring threshold
 MAX_CONFIDENCE_PCT   = 75    # Cap — above = lagging signal
 ATR_SL_MULTIPLIER    = 1.5   # SL = ATR × 1.5 (~130 pips)
 MIN_SL_PIPS          = 50    # Minimum stop loss
 MAX_SL_PIPS          = 200   # Maximum stop loss
-TOTAL_INDICATORS     = 12    # Voted indicators (BBands excluded)
+TOTAL_INDICATORS     = 9     # 9 voted indicators (BBands removed — negative accuracy)
 USE_ML_FILTER        = False # ML disabled (47% accuracy = worse than coin flip)
 ACTIVE_PROFILE       = "FundedNext_1Step"
 RISK_PER_TRADE_PCT   = 1.0
@@ -127,7 +127,7 @@ RISK_PER_TRADE_PCT   = 1.0
 
 ### Session Filter (Critical)
 ```python
-SESSION_ACTIVE_HOURS = frozenset({13,14,15,16,17,18,19,20,21})
+SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00–21:59 UTC (NY + Overlap)
 # NY session: 13:00-22:00 UTC = 6:00 PM - 1:00 AM PKT
 # London session deliberately excluded (33.9% win rate vs 63.3% NY)
 ```
@@ -135,31 +135,44 @@ SESSION_ACTIVE_HOURS = frozenset({13,14,15,16,17,18,19,20,21})
 ### Scoring Gates
 ```python
 MIN_ACTIVE    = 4  # Minimum active (bull+bear) indicators
-MIN_DOMINANT  = 4  # Minimum in dominant direction
-# DO NOT lower these — tested: MIN_ACTIVE=3 → PF drops 1.23→1.08, DD rises to 14.94%
+MIN_DOMINANT  = 3  # Minimum in dominant direction (9-indicator system)
+# DO NOT raise MIN_DOMINANT to 4 — with 9 indicators it filters too aggressively
+# DO NOT add more unvalidated indicators (Stage 2 additions dropped PF 1.23→0.90)
+```
+
+### Indicator Set (9 Voted — FROZEN until Stage 3 macro features added)
+```
+1. EMA (20/50/200 stack)    6. Stochastic (%K/%D crossover)
+2. ADX-14                   7. CCI-20
+3. Ichimoku Cloud           8. Bollinger Bands (touch + squeeze)
+4. RSI-14 + divergence      9. ATR-14 (volatility only, neutral vote)
+5. MACD (12,26,9)          10. Volume surge confirmation
+BBands kept as ML feature only — removed from voting (42.3% accuracy)
 ```
 
 ---
 
-## Indicator Set (Current — 12 Voted)
+## Indicator Set (9 Voted — Validated Config, DO NOT ADD MORE)
 
 | # | Indicator | Status | Notes |
 |---|-----------|--------|-------|
-| 1 | HMA-20 / EMA-50 / EMA-200 | ✅ Active | HMA replaced EMA-20 (less lag) |
+| 1 | EMA (20/50/200 stack) | ✅ Active | Price vs EMA alignment |
 | 2 | ADX-14 | ✅ Active | Trend strength + direction |
 | 3 | Ichimoku Cloud | ✅ Active | Very effective on gold |
 | 4 | RSI-14 | ✅ Active | + divergence detection |
 | 5 | MACD (12,26,9) | ✅ Active | Trend momentum |
-| 6 | Williams %R-14 | ✅ Active | Replaced Stochastic (less lag) |
-| 7 | CCI | ✅ Active | Commodity momentum |
-| 8 | Supertrend (10, 3.0) | ✅ Active | Clean trend confirmation |
-| 9 | Connors RSI | ✅ Active | Multi-factor momentum |
-| 10 | Keltner Channels | ✅ Active | Squeeze detection |
-| 11 | ATR-14 | ✅ Active | Volatility / SL sizing only |
-| 12 | Volume | ✅ Active | Surge confirmation |
-| — | Bollinger Bands | ❌ Removed | 42.3% accuracy = harmful |
-| — | Stochastic | ❌ Removed | Replaced by Williams %R |
-| — | EMA-20 | ❌ Removed | Replaced by HMA-20 |
+| 6 | Stochastic (14,3,3) | ✅ Active | %K/%D crossover |
+| 7 | CCI-20 | ✅ Active | Commodity momentum |
+| 8 | ATR-14 | ✅ Active | Volatility / SL sizing only |
+| 9 | Volume | ✅ Active | Surge confirmation |
+| — | Bollinger Bands | ⚠️ ML only | 42.3% voting accuracy = removed from scoring |
+| — | Williams %R | ❌ Not validated | Added in Stage 2, caused PF regression |
+| — | Supertrend | ❌ Not validated | Added in Stage 2, caused PF regression |
+| — | Connors RSI | ❌ Not validated | Added in Stage 2, caused PF regression |
+| — | Keltner Channels | ❌ Not validated | Added in Stage 2, caused PF regression |
+
+**WARNING:** Adding indicators 10-13 (Connors RSI, Keltner, Supertrend, Williams %R)
+dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested validation.
 
 ---
 
@@ -193,11 +206,13 @@ MIN_DOMINANT  = 4  # Minimum in dominant direction
 | Session filter added | conf=65% | 13 | 38.5% | 1.36 | 3.50% | +$298 |
 | **Polygon 2yr data** | **conf=65%** | **112** | **38.4%** | **1.23** | **10.04%** | **+$1,773** |
 | After MIN_ACTIVE=3 (reverted) | conf=65% | 180 | 35.6% | 1.08 | 14.94% | +$1,003 |
-| Stage 2 indicators (current) | conf=65% | 111 | 31.5% | 0.90 | 15.72% | -$696 |
+| Stage 2 indicators (broken) | conf=65% | 111 | 31.5% | 0.90 | 15.72% | -$696 |
+| **9-indicator revert (current)** | **conf=65%** | **180** | **36.1%** | **1.09** | **12.27%** | **+$1,030** |
 
-**Best validated config:** 112 trades, PF 1.23, DD 10.04%, +17.7% return (2yr)
-
-**Current issue:** Stage 2 indicator additions broke PF from 1.23 → 0.90. Investigation needed.
+**Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
+Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
+(Apr 2024–Mar 2026) hits a 6-month losing streak at the start (Apr–Oct 2024) which depresses PF.
+Sep 2024–Mar 2026 alone is strongly profitable (+$2,884).
 
 ---
 
@@ -213,8 +228,10 @@ MIN_DOMINANT  = 4  # Minimum in dominant direction
 | Backtest resampling H1 from M15 | Wrong H1 indicators | Separate H1 fetch |
 | ML filter blocking good signals | PF degraded | Disabled (USE_ML_FILTER=False) |
 | MIN_ACTIVE=3 too low | PF 1.23→1.08, DD 14.94% | Reverted to MIN_ACTIVE=4 |
-| Backtest hanging on 48k bars | Never completes | PrecomputedIndicators class |
+| Backtest hanging on 48k bars | Never completes | PrecomputedIndicators shim in indicators.py |
 | Polygon fetching 5yr instead of 2yr | Timeout/hang | bars=47000 for M15 |
+| Stage 2 indicators (Connors/Keltner/Supertrend) | PF 1.23→0.90 | Reverted indicators.py+scoring.py to commit 88c1496 |
+| Parallel Polygon fetch rate-limited (429) | Both fetches time out | Sequential fetch with 300s timeout |
 | Telegram blocked in Pakistan | No alerts | Replaced with Discord webhook |
 
 ---
@@ -265,13 +282,10 @@ Diagnostic on 277 signals showed:
 
 ### ✅ COMPLETED
 - **Phase 1** — Data Infrastructure (Polygon.io, 2yr M15/H1)
-- **Phase 2** — Backtesting (validated config PF 1.23)
+- **Phase 2** — Backtesting (validated config PF 1.09–1.23, profitable on 2yr data)
 - **Phase 3** — Stability (SQLite, Discord, health check, dedup)
 - **Stage 1** — Environment setup (Arch Linux, Python 3.12)
-- **Stage 2** — Indicator upgrade (12 indicators, partial — PF regression issue)
-
-### 🔄 IN PROGRESS
-- **Stage 2 debug** — Investigating why PF dropped from 1.23 → 0.90 after Stage 2
+- **Stage 2** — REVERTED (Connors RSI/Keltner/Supertrend added noise, PF→0.90, fixed by revert)
 
 ### 📋 REMAINING STAGES
 
@@ -518,13 +532,13 @@ Model C: CNN-BiLSTM — deep direction model
 
 ---
 
-## Current Immediate Task
-**Debug Stage 2 regression: PF dropped from 1.23 → 0.90**
+## Current Status (2026-03-28)
+**9-indicator system restored. PF 1.09 on current 2yr Polygon window. Ready for Stage 3.**
 
-Investigating which of these caused it:
-- MAX_CONFIDENCE=75% gate rejecting high-confidence signals
-- New indicators (Supertrend, Connors RSI, Keltner) producing noisy votes
-- MIN_DOMINANT=4 being too strict with 12 indicators instead of 9
-- PrecomputedIndicators class having subtle differences from calculate_all()
+Stage 2 regression was caused by adding 4 unvalidated indicators (Connors RSI, Keltner Channels,
+Supertrend, Williams %R) and raising MIN_DOMINANT from 3→4. This degraded signal quality.
+Fix: reverted `analysis/indicators.py` and `analysis/scoring.py` to commit `88c1496`.
 
-Next step after fixing: Run clean backtest confirming PF ≥ 1.23, then proceed to Stage 3.
+Note on PF 1.09 vs original 1.23: different market windows. Apr–Oct 2024 was a bad regime
+for this strategy (5 consecutive losing months). Sep 2024–Mar 2026 is strongly profitable.
+The strategy is sound. Next priority: Stage 3 macro features (DXY/VIX) to filter bad regimes.

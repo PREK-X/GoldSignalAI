@@ -236,7 +236,7 @@ class Config:
     # ── Signal Scoring ────────────────────────────────────────────────────────
     # Validated config — 2yr backtest: PF 1.23,
     # DD 10.04%, +17.7% return, 112 trades
-    TOTAL_INDICATORS     = 12           # 12 voted indicators (HMA/EMA, ADX, Ichimoku, RSI, MACD, Williams %R, CCI, Supertrend, Connors RSI, Keltner, ATR, Volume; BBands ML-only)
+    TOTAL_INDICATORS     = 9            # 9 voted indicators (BBands removed — negative accuracy)
     MIN_CONFIDENCE_PCT   = 65           # Minimum to fire BUY/SELL signal
     MAX_CONFIDENCE_PCT   = 75           # Cap — above 75% indicates over-consensus (lagging)
     WAIT_LOWER_BOUND_PCT = 30           # Below this = strong counter-signal
