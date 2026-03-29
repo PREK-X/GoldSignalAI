@@ -9,7 +9,8 @@
       "Bash(venv/bin/python -m backtest.diagnostic 2>&1 | grep -v \"^Fib:\" | grep -v \"MetaTrader\")",
       "Bash(git stash:*)",
       "Bash(venv/bin/python -m pytest tests/test_news_fetcher.py::test_parse_ff_datetime tests/test_tracker.py::test_daily_loss_stops_trading -v)",
-      "Bash(venv/bin/python -m pytest tests/ -v --tb=no -q)"
+      "Bash(venv/bin/python -m pytest tests/ -v --tb=no -q)",
+      "Bash(venv/bin/python -m py_compile backtest/engine.py)"
     ]
   }
 }

@@ -26,12 +26,14 @@ All calculations use pips. For Gold (XAU/USD):
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Optional
 
 import numpy as np
 
 from config import Config
 from analysis.sr_levels import SRLevels
+from infrastructure.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +264,141 @@ def _calculate_lot_size(
     lot_size = max(0.01, lot_size)
 
     return lot_size, risk_usd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HALF-KELLY ATR-ADJUSTED POSITION SIZING
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hard caps for dynamic risk %
+_MIN_RISK_PCT = 0.1
+_MAX_RISK_PCT = 2.0
+_KELLY_MIN_TRADES = 20   # fallback to flat 1% if fewer trades in window
+_KELLY_WINDOW = 50       # rolling window of closed trades
+
+# ATR adjustment thresholds
+_ATR_HIGH_RATIO = 1.5    # high-vol: scale down
+_ATR_LOW_RATIO = 0.7     # low-vol: scale up
+_ATR_HIGH_MULT = 0.7
+_ATR_LOW_MULT = 1.2
+
+
+def calculate_half_kelly_risk_pct(
+    recent_trades: list[dict],
+    current_atr: float,
+    avg_atr_28: float,
+    circuit_multiplier: float = 1.0,
+) -> float:
+    """
+    Compute dynamic risk % using Half-Kelly with ATR adjustment.
+
+    Args:
+        recent_trades: Last N closed trades, each with keys
+                       {"pnl_pips", "is_winner", "sl_pips"}.
+                       Most recent last.
+        current_atr:   Current ATR-14 value.
+        avg_atr_28:    Rolling 28-bar average ATR.
+        circuit_multiplier: From circuit breaker (0.0 – 1.0).
+
+    Returns:
+        Risk % per trade (clamped to [0.1, 2.0]).
+    """
+    # Step 1: Half-Kelly fraction
+    window = recent_trades[-_KELLY_WINDOW:]
+    if len(window) < _KELLY_MIN_TRADES:
+        half_kelly_pct = Config.RISK_PER_TRADE_PCT  # fallback 1.0%
+    else:
+        wins = [t for t in window if t["is_winner"]]
+        losses = [t for t in window if not t["is_winner"]]
+        win_rate = len(wins) / len(window)
+        loss_rate = 1.0 - win_rate
+
+        avg_win = np.mean([abs(t["pnl_pips"]) for t in wins]) if wins else 0.0
+        avg_loss = np.mean([abs(t["pnl_pips"]) for t in losses]) if losses else 1.0
+
+        if avg_win <= 0:
+            half_kelly_pct = _MIN_RISK_PCT
+        else:
+            kelly = (win_rate * avg_win - loss_rate * avg_loss) / avg_win
+            half_kelly_pct = max(kelly * 0.5, 0.0) * 100  # convert fraction to %
+            if half_kelly_pct <= 0:
+                half_kelly_pct = _MIN_RISK_PCT
+
+    # Step 2: ATR adjustment
+    if avg_atr_28 > 0:
+        atr_ratio = current_atr / avg_atr_28
+        if atr_ratio > _ATR_HIGH_RATIO:
+            half_kelly_pct *= _ATR_HIGH_MULT
+        elif atr_ratio < _ATR_LOW_RATIO:
+            half_kelly_pct *= _ATR_LOW_MULT
+
+    # Step 3: Apply circuit breaker multiplier
+    half_kelly_pct *= circuit_multiplier
+
+    # Step 4: Hard caps
+    return max(_MIN_RISK_PCT, min(_MAX_RISK_PCT, half_kelly_pct))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXIT CONDITION HELPERS (for backtest engine)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def should_friday_close(bar_time: datetime) -> bool:
+    """Return True if bar_time is Friday >= 20:00 UTC (weekend gap protection)."""
+    # weekday(): Monday=0 ... Friday=4
+    return bar_time.weekday() == 4 and bar_time.hour >= 20
+
+
+def should_time_exit(bars_since_entry: int, max_bars: int = 48) -> bool:
+    """Return True if trade has been open for >= max_bars M15 bars (12 hours)."""
+    return bars_since_entry >= max_bars
+
+
+def update_trailing_stop(
+    direction: str,
+    entry_price: float,
+    current_price: float,
+    current_trail_stop: Optional[float],
+    sl_pips: float,
+    atr_value: float,
+) -> Optional[float]:
+    """
+    Compute updated trailing stop.
+
+    Activates when unrealised profit >= 1R (1x initial risk in pips).
+    Trail distance = 0.5 * ATR14.
+    Never moves against the position direction.
+
+    Args:
+        direction:          "BUY" or "SELL"
+        entry_price:        Trade entry price
+        current_price:      Current bar close
+        current_trail_stop: Existing trailing stop (None if not yet active)
+        sl_pips:            Initial risk in pips (1R)
+        atr_value:          Current ATR14
+
+    Returns:
+        Updated trailing stop price, or None if not yet activated.
+    """
+    initial_risk_price = pips_to_price(sl_pips)
+    trail_distance = atr_value * 0.5
+
+    if direction == "BUY":
+        unrealised = current_price - entry_price
+        if unrealised < initial_risk_price:
+            return current_trail_stop  # not yet at 1R
+        new_trail = current_price - trail_distance
+        if current_trail_stop is not None:
+            return max(current_trail_stop, new_trail)  # never move down
+        return new_trail
+    else:  # SELL
+        unrealised = entry_price - current_price
+        if unrealised < initial_risk_price:
+            return current_trail_stop
+        new_trail = current_price + trail_distance
+        if current_trail_stop is not None:
+            return min(current_trail_stop, new_trail)  # never move up
+        return new_trail
 
 
 # ─────────────────────────────────────────────────────────────────────────────

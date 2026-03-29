@@ -47,7 +47,12 @@ from signals.risk_manager import (
     price_to_pips,
     pips_to_price,
     RiskParameters,
+    calculate_half_kelly_risk_pct,
+    should_friday_close,
+    should_time_exit,
+    update_trailing_stop,
 )
+from infrastructure.circuit_breaker import CircuitBreaker, NORMAL, CAUTION, RESTRICTED, HALTED
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +155,12 @@ class BacktestTrade:
     regime_state: int = -1       # 0=TRENDING, 1=RANGING, 2=CRISIS, -1=unknown
     regime_label: str = ""
 
+    # Stage 6: risk management
+    entry_bar_idx: int = 0       # M15 bar index at entry (for 48-bar time exit)
+    initial_sl_pips: float = 0.0 # original SL before trailing (1R reference)
+    trailing_stop: Optional[float] = None  # active trailing stop price
+    risk_pct_used: float = 0.0   # actual risk % after Half-Kelly + circuit breaker
+
     def to_dict(self) -> dict:
         """Convert to dict for CSV/DataFrame export."""
         return {
@@ -172,6 +183,7 @@ class BacktestTrade:
             "is_winner": self.is_winner,
             "tp1_hit": self.tp1_hit,
             "regime": self.regime_label,
+            "risk_pct": round(self.risk_pct_used, 2),
         }
 
 
@@ -267,6 +279,15 @@ class BacktestResult:
     regime_distribution: dict = field(default_factory=dict)
     regime_filtered: int = 0   # signals suppressed by CRISIS regime
 
+    # Stage 6: circuit breaker & risk stats
+    cb_state_counts: dict = field(default_factory=dict)   # {NORMAL: N, CAUTION: N, ...}
+    cb_days_halted: int = 0
+    cb_total_dd_overrides: int = 0
+    avg_risk_pct: float = 0.0
+    exit_friday_close: int = 0
+    exit_time_48bar: int = 0
+    exit_trailing_stop: int = 0
+
     def summary(self) -> str:
         """Human-readable summary string."""
         lines = [
@@ -292,6 +313,20 @@ class BacktestResult:
             f" Best Streak:      {self.best_streak} wins",
             f" Worst Streak:     {self.worst_streak} losses",
         ]
+        if self.cb_state_counts:
+            lines.append(f"{'─' * 50}")
+            lines.append(f" Circuit Breaker:")
+            for state, count in self.cb_state_counts.items():
+                lines.append(f"   {state:12s} {count:5d} signals")
+            lines.append(f"   Days halted:        {self.cb_days_halted}")
+            lines.append(f"   Total DD overrides: {self.cb_total_dd_overrides}")
+            lines.append(f"   Avg risk %:         {self.avg_risk_pct:.2f}%")
+        if self.exit_friday_close or self.exit_time_48bar or self.exit_trailing_stop:
+            lines.append(f"{'─' * 50}")
+            lines.append(f" Exit Reasons (new):")
+            lines.append(f"   Friday close:    {self.exit_friday_close}")
+            lines.append(f"   48-bar timeout:  {self.exit_time_48bar}")
+            lines.append(f"   Trailing stop:   {self.exit_trailing_stop}")
         if self.regime_distribution:
             lines.append(f"{'─' * 50}")
             lines.append(f" Regime Distribution (H1 bars):")
@@ -566,6 +601,32 @@ def _check_exit(
             return False
 
     return False  # trade still open
+
+
+def _close_trade_at_market(
+    trade: BacktestTrade,
+    exit_price: float,
+    exit_time: datetime,
+    reason: str,
+) -> None:
+    """Close a trade at a given price with a custom exit reason."""
+    trade.exit_price = exit_price
+    trade.exit_time = exit_time
+    trade.exit_reason = reason
+    pip_value = Config.GOLD_PIP_VALUE
+    if trade.direction == "BUY":
+        trade.pnl_pips = price_to_pips(exit_price - trade.entry_price)
+    else:
+        trade.pnl_pips = price_to_pips(trade.entry_price - exit_price)
+    # If TP1 was already hit, add that partial profit
+    if trade.tp1_hit:
+        total_pnl_pips = trade.tp1_pnl_pips + trade.pnl_pips
+        remaining_lot = trade.lot_size * 0.5
+        trade.pnl_usd = trade.tp1_pnl_usd + trade.pnl_pips * pip_value * remaining_lot
+        trade.pnl_pips = total_pnl_pips
+    else:
+        trade.pnl_usd = trade.pnl_pips * pip_value * trade.lot_size
+    trade.is_winner = trade.pnl_pips > 0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1177,6 +1238,23 @@ def run_backtest(
     except Exception as exc:
         print(f"[Backtest] HMM regime filter failed: {exc}")
 
+    # ── Step 3 pre: Vectorised ATR-14 + 28-bar rolling avg ─────────────
+    # Avoids calling m15_precomp.at(i) (which runs full calculate_all) in the
+    # inner loop — critical for performance on 48k-bar datasets.
+    _high = m15_processed["high"].values
+    _low  = m15_processed["low"].values
+    _close = m15_processed["close"].values
+    _prev_close = np.roll(_close, 1)
+    _prev_close[0] = _close[0]
+    _tr = np.maximum(
+        _high - _low,
+        np.maximum(np.abs(_high - _prev_close), np.abs(_low - _prev_close))
+    )
+    # Wilder's ATR (EWM alpha = 1/14)
+    _atr14_series = pd.Series(_tr).ewm(span=14, adjust=False).mean().values
+    # 28-bar rolling average of ATR14 (shift forward so index i = avg of bars [i-28..i-1])
+    _atr28_avg_series = pd.Series(_atr14_series).rolling(28, min_periods=1).mean().values
+
     # ── Step 3: Walk-forward simulation ────────────────────────────────
     trades: list[BacktestTrade] = []
     open_trade: Optional[BacktestTrade] = None
@@ -1195,20 +1273,23 @@ def run_backtest(
     signals_found = 0
     ml_filtered = 0
     regime_filtered = 0  # count of signals suppressed by CRISIS regime
-    circuit_breaker_paused = 0  # count of bars skipped by circuit breaker
+    circuit_breaker_paused = 0  # count of signals blocked by circuit breaker
     limit_orders_placed = 0    # count of limit orders placed
     limit_orders_filled = 0    # count of limit orders filled
     limit_orders_expired = 0   # count of limit orders expired
     limit_no_sr = 0            # count of signals skipped (no S/R within range)
 
-    # Daily circuit breaker: pause rest of day after 3 consecutive losses
-    consecutive_losses = 0
-    paused_until_day: Optional[str] = None  # YYYY-MM-DD — skip rest of this day
-
-    # Weekly circuit breaker: pause rest of week after 5 losses in 7-day window
-    weekly_cb_triggered = 0
-    weekly_loss_timestamps: list = []       # timestamps of recent losses (rolling 7 days)
-    weekly_paused_until_monday: Optional[str] = None  # ISO week start YYYY-MM-DD
+    # Stage 6: PnL-based circuit breaker (replaces old consecutive-loss breaker)
+    cb = CircuitBreaker()
+    daily_open_balance = cfg.account_balance
+    current_day_str = ""
+    peak_balance = cfg.account_balance
+    cb_state_counts = {NORMAL: 0, CAUTION: 0, RESTRICTED: 0, HALTED: 0}
+    cb_days_halted_set: set = set()
+    cb_total_dd_override_count = 0
+    exit_friday_close_count = 0
+    exit_time_48bar_count = 0
+    exit_trailing_stop_count = 0
 
     # Pending limit order (only one at a time, like open trades)
     pending_order: Optional[_PendingOrder] = None
@@ -1218,24 +1299,29 @@ def run_backtest(
         bar_time = m15_processed.index[i]
         bar_high = bar["high"]
         bar_low = bar["low"]
+        bar_close = bar["close"]
 
-        # Progress logging — print every 1000 bars so it's visible even with 2>/dev/null
+        # Progress logging
         bars_done = i - start_idx
         if bars_done % 1000 == 0 and bars_done > 0:
             pct = bars_done / (total_bars - start_idx) * 100
             print(f"[Backtest] Processing bar {bars_done}/{total_bars - start_idx} ({pct:.1f}%)", flush=True)
 
-        # ── Reset daily circuit breaker on new day ────────────────────
-        current_day = bar_time.strftime("%Y-%m-%d")
-        if paused_until_day and current_day != paused_until_day:
-            paused_until_day = None
-            consecutive_losses = 0
+        # ── Track daily PnL + total DD for circuit breaker ────────────
+        this_day = bar_time.strftime("%Y-%m-%d")
+        if this_day != current_day_str:
+            current_day_str = this_day
+            running_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
+            daily_open_balance = running_balance
+            if running_balance > peak_balance:
+                peak_balance = running_balance
 
-        # ── Reset weekly circuit breaker on Monday 00:00 UTC ──────────
-        # weekday(): Monday=0 … Sunday=6
-        monday_of_week = (bar_time - timedelta(days=bar_time.weekday())).strftime("%Y-%m-%d")
-        if weekly_paused_until_monday and monday_of_week != weekly_paused_until_monday:
-            weekly_paused_until_monday = None
+        current_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
+        if current_balance > peak_balance:
+            peak_balance = current_balance
+
+        daily_pnl_pct = ((current_balance - daily_open_balance) / cfg.account_balance * 100) if cfg.account_balance > 0 else 0.0
+        total_dd_pct = ((peak_balance - current_balance) / cfg.account_balance * 100) if cfg.account_balance > 0 else 0.0
 
         # ── Check pending limit order fill / expiry ───────────────────
         if pending_order is not None and open_trade is None:
@@ -1243,7 +1329,6 @@ def run_backtest(
                 limit_orders_expired += 1
                 pending_order = None
             elif pending_order.is_filled(bar_high, bar_low):
-                # Limit order filled — open the trade
                 limit_orders_filled += 1
                 entry = pending_order.limit_price
                 entry = _apply_spread(entry, pending_order.direction, cfg.spread_pips)
@@ -1260,44 +1345,69 @@ def run_backtest(
                     sl_pips=pending_order.sl_pips,
                     tp1_pips=pending_order.tp1_pips,
                     tp2_pips=pending_order.tp2_pips,
+                    entry_bar_idx=i,
+                    initial_sl_pips=pending_order.sl_pips,
                 )
                 pending_order = None
                 bars_since_last_trade = 0
                 continue  # don't check exit on fill bar
 
-        # ── Check open trade exit ──────────────────────────────────────
+        # ── Manage open trade: new exits + original SL/TP ─────────────
         if open_trade is not None:
+            # Use vectorised ATR (O(1))
+            cur_atr = float(_atr14_series[i])
+
+            bars_held = i - open_trade.entry_bar_idx
+
+            # a) Friday 20:00 UTC close (weekend gap protection)
+            if should_friday_close(bar_time):
+                _close_trade_at_market(open_trade, bar_close, bar_time, "FRIDAY_CLOSE")
+                trades.append(open_trade)
+                exit_friday_close_count += 1
+                open_trade = None
+                bars_since_last_trade = 0
+                continue
+
+            # b) 48-bar time exit (12 hours)
+            if should_time_exit(bars_held):
+                _close_trade_at_market(open_trade, bar_close, bar_time, "TIME_EXIT_48")
+                trades.append(open_trade)
+                exit_time_48bar_count += 1
+                open_trade = None
+                bars_since_last_trade = 0
+                continue
+
+            # c) Trailing stop update + check
+            if cur_atr > 0:
+                open_trade.trailing_stop = update_trailing_stop(
+                    direction=open_trade.direction,
+                    entry_price=open_trade.entry_price,
+                    current_price=bar_close,
+                    current_trail_stop=open_trade.trailing_stop,
+                    sl_pips=open_trade.initial_sl_pips,
+                    atr_value=cur_atr,
+                )
+            if open_trade.trailing_stop is not None:
+                trail_hit = False
+                if open_trade.direction == "BUY" and bar_low <= open_trade.trailing_stop:
+                    trail_hit = True
+                elif open_trade.direction == "SELL" and bar_high >= open_trade.trailing_stop:
+                    trail_hit = True
+                if trail_hit:
+                    _close_trade_at_market(open_trade, open_trade.trailing_stop, bar_time, "TRAIL_STOP")
+                    trades.append(open_trade)
+                    exit_trailing_stop_count += 1
+                    open_trade = None
+                    bars_since_last_trade = 0
+                    continue
+
+            # d) Original SL/TP exit
             closed = _check_exit(open_trade, bar_high, bar_low, bar_time)
             if closed:
                 trades.append(open_trade)
-                # Track consecutive losses for daily circuit breaker
-                if open_trade.is_winner:
-                    consecutive_losses = 0
-                else:
-                    consecutive_losses += 1
-                    if consecutive_losses >= 3 and paused_until_day is None:
-                        paused_until_day = current_day
-                        logger.debug(
-                            "Daily circuit breaker: 3 consecutive losses on %s — pausing day",
-                            current_day,
-                        )
-
-                    # Weekly circuit breaker: track losses in rolling 7-day window
-                    weekly_loss_timestamps.append(bar_time)
-                    cutoff = bar_time - timedelta(days=7)
-                    weekly_loss_timestamps = [t for t in weekly_loss_timestamps if t > cutoff]
-                    if (len(weekly_loss_timestamps) >= 5
-                            and weekly_paused_until_monday is None):
-                        weekly_paused_until_monday = monday_of_week
-                        weekly_cb_triggered += 1
-                        logger.debug(
-                            "Weekly circuit breaker: 5 losses in 7 days ending %s — "
-                            "pausing until next Monday",
-                            current_day,
-                        )
                 open_trade = None
                 bars_since_last_trade = 0
-                continue  # don't open a new trade on the same bar
+                continue
 
         bars_since_last_trade += 1
 
@@ -1305,31 +1415,20 @@ def run_backtest(
         if open_trade is not None or pending_order is not None:
             continue
 
-        # ── Daily circuit breaker: skip rest of today ─────────────────
-        if paused_until_day == current_day:
-            circuit_breaker_paused += 1
-            continue
-
-        # ── Weekly circuit breaker: skip rest of this week ─────────────
-        if weekly_paused_until_monday == monday_of_week:
-            circuit_breaker_paused += 1
-            continue
-
-        # ── Skip if too soon after last trade ──────────────────────────
+        # ── Skip if too soon after last trade ─────────────────────────
         if bars_since_last_trade < cfg.min_bars_between_trades:
             continue
 
-        # ── Run analysis on lookback window ────────────────────────────
+        # ── Run analysis on lookback window ───────────────────────────
         m15_slice = m15_processed.iloc[max(0, i - lookback):i + 1]
 
-        # Get corresponding H1 data up to this point — O(log n) with searchsorted
         h1_idx = h1_processed.index.searchsorted(bar_time, side="right")
         h1_slice = h1_processed.iloc[max(0, h1_idx - lookback):h1_idx]
 
         if len(m15_slice) < min_bars or len(h1_slice) < 50:
             continue
 
-        # ── Analyse — use precomputed indicators for O(1) lookups ──────
+        # ── Analyse — use precomputed indicators for O(1) lookups ─────
         h1_bar_idx = h1_idx - 1 if h1_idx > 0 else 0
         analysis = _analyse_bar(
             m15_slice, h1_slice, bar_time=bar_time,
@@ -1362,7 +1461,6 @@ def run_backtest(
         bar_regime_label = "RANGING"
         bar_regime_mult = 1.0
         if h1_regime_states is not None:
-            # Find the H1 bar index corresponding to this M15 bar
             h1_regime_idx = h1_processed.index.searchsorted(bar_time, side="right") - 1
             h1_regime_idx = max(0, min(h1_regime_idx, len(h1_regime_states) - 1))
             bar_regime_state = int(h1_regime_states[h1_regime_idx])
@@ -1370,13 +1468,48 @@ def run_backtest(
             bar_regime_mult = regime_multipliers.get(bar_regime_state, 1.0)
 
             if bar_regime_mult == 0.0:
-                # CRISIS regime — suppress signal
                 regime_filtered += 1
                 continue
 
-        # ── Calculate lot size ─────────────────────────────────────────
-        current_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
+        # ── Circuit breaker gate ──────────────────────────────────────
+        cb_state = cb.get_circuit_state(daily_pnl_pct, total_dd_pct)
+        if not cb.is_signal_allowed(daily_pnl_pct, total_dd_pct, confidence):
+            circuit_breaker_paused += 1
+            cb_state_counts[cb_state] = cb_state_counts.get(cb_state, 0) + 1
+            if cb_state == HALTED:
+                cb_days_halted_set.add(this_day)
+            continue
+        cb_state_counts[cb_state] = cb_state_counts.get(cb_state, 0) + 1
+
+        # Track total DD override activations
+        cb_mult = cb.get_size_multiplier(daily_pnl_pct, total_dd_pct)
+        if cb.total_dd_override_active:
+            cb_total_dd_override_count += 1
+
+        # ── Half-Kelly ATR-adjusted position sizing ───────────────────
         pip_value = Config.GOLD_PIP_VALUE
+
+        # Use vectorised ATR arrays (O(1) — precomputed before loop)
+        cur_atr = float(_atr14_series[i])
+        avg_atr_28 = float(_atr28_avg_series[i])
+
+        # Build recent trades window for Kelly calculation
+        recent_for_kelly = [
+            {"pnl_pips": t.pnl_pips, "is_winner": t.is_winner, "sl_pips": t.initial_sl_pips or t.sl_pips}
+            for t in trades[-50:]
+        ]
+
+        risk_pct = calculate_half_kelly_risk_pct(
+            recent_trades=recent_for_kelly,
+            current_atr=cur_atr,
+            avg_atr_28=avg_atr_28,
+            circuit_multiplier=cb_mult,
+        )
+
+        # Apply regime multiplier on top
+        if bar_regime_mult < 1.0:
+            risk_pct *= bar_regime_mult
+            risk_pct = max(0.1, risk_pct)
 
         # ── Limit order entry (at S/R levels) ─────────────────────────
         if cfg.use_limit_orders:
@@ -1389,16 +1522,12 @@ def run_backtest(
             )
             if pending is None:
                 limit_no_sr += 1
-                continue  # no suitable S/R level — skip signal
+                continue
 
-            # Set lot size, bar info, confidence
             sl_for_lot = cfg.limit_sl_pips
-            risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
+            risk_usd = current_balance * (risk_pct / 100)
             lot_size = risk_usd / (sl_for_lot * pip_value) if sl_for_lot > 0 else 0.01
             lot_size = round(max(0.01, lot_size), 2)
-            # Apply regime multiplier
-            if bar_regime_mult < 1.0:
-                lot_size = round(max(0.01, lot_size * bar_regime_mult), 2)
 
             pending.lot_size = lot_size
             pending.confidence_pct = confidence
@@ -1411,17 +1540,14 @@ def run_backtest(
             bars_since_last_trade = 0
 
         else:
-            # ── Market order entry (original logic) ───────────────────
+            # ── Market order entry ────────────────────────────────────
             entry = risk.entry_price
             entry = _apply_spread(entry, direction, cfg.spread_pips)
             entry = _apply_slippage(entry, direction, cfg.slippage_pips)
 
-            risk_usd = current_balance * (cfg.risk_per_trade_pct / 100)
+            risk_usd = current_balance * (risk_pct / 100)
             lot_size = risk_usd / (risk.sl_pips * pip_value) if risk.sl_pips > 0 else 0.01
             lot_size = round(max(0.01, lot_size), 2)
-            # Apply regime multiplier
-            if bar_regime_mult < 1.0:
-                lot_size = round(max(0.01, lot_size * bar_regime_mult), 2)
 
             open_trade = BacktestTrade(
                 entry_time=bar_time,
@@ -1437,6 +1563,9 @@ def run_backtest(
                 tp2_pips=risk.tp2_pips,
                 regime_state=bar_regime_state,
                 regime_label=bar_regime_label,
+                entry_bar_idx=i,
+                initial_sl_pips=risk.sl_pips,
+                risk_pct_used=risk_pct,
             )
             bars_since_last_trade = 0
 
@@ -1444,16 +1573,7 @@ def run_backtest(
     if open_trade is not None:
         last_bar = m15_processed.iloc[-1]
         last_time = m15_processed.index[-1]
-        open_trade.exit_price = last_bar["close"]
-        open_trade.exit_time = last_time
-        open_trade.exit_reason = "END_OF_DATA"
-        if open_trade.direction == "BUY":
-            open_trade.pnl_pips = price_to_pips(last_bar["close"] - open_trade.entry_price)
-        else:
-            open_trade.pnl_pips = price_to_pips(open_trade.entry_price - last_bar["close"])
-        pip_value = Config.GOLD_PIP_VALUE
-        open_trade.pnl_usd = open_trade.pnl_pips * pip_value * open_trade.lot_size
-        open_trade.is_winner = open_trade.pnl_pips > 0
+        _close_trade_at_market(open_trade, last_bar["close"], last_time, "END_OF_DATA")
         trades.append(open_trade)
 
     # Cancel any remaining pending order
@@ -1466,13 +1586,13 @@ def run_backtest(
               f"| Regime filtered: {regime_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
-              f"| Circuit breaker skips: {circuit_breaker_paused} "
-              f"| Weekly CB triggered: {weekly_cb_triggered} | Trades: {len(trades)}")
+              f"| CB blocked: {circuit_breaker_paused} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
               f"| Regime filtered: {regime_filtered} "
-              f"| Circuit breaker skips: {circuit_breaker_paused} "
-              f"| Weekly CB triggered: {weekly_cb_triggered} | Trades taken: {len(trades)}")
+              f"| CB blocked: {circuit_breaker_paused} | Trades taken: {len(trades)}")
+    print(f"[Backtest] Exits — Friday: {exit_friday_close_count} | "
+          f"48-bar: {exit_time_48bar_count} | Trail: {exit_trailing_stop_count}")
     logger.info("Backtest complete: %d trades generated.", len(trades))
 
     # ── Step 4: Compute statistics ─────────────────────────────────────
@@ -1487,6 +1607,17 @@ def run_backtest(
             for s, c in zip(unique, counts)
         }
         result.regime_filtered = regime_filtered
+
+    # ── Step 4c: Add circuit breaker stats to result ───────────────────
+    result.cb_state_counts = dict(cb_state_counts)
+    result.cb_days_halted = len(cb_days_halted_set)
+    result.cb_total_dd_overrides = cb_total_dd_override_count
+    result.exit_friday_close = exit_friday_close_count
+    result.exit_time_48bar = exit_time_48bar_count
+    result.exit_trailing_stop = exit_trailing_stop_count
+    if trades:
+        risk_pcts = [t.risk_pct_used for t in trades if t.risk_pct_used > 0]
+        result.avg_risk_pct = float(np.mean(risk_pcts)) if risk_pcts else 0.0
 
     # ── Step 5: Prop firm simulations ──────────────────────────────────
     if cfg.simulate_prop_firm:
