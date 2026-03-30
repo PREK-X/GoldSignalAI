@@ -190,10 +190,10 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 - M15 limit: Last 60 days only (hard limit)
 - Used only when Polygon key missing
 
-### Planned: macro_fetcher.py
+### Macro Data: macro_fetcher.py (implemented)
 - DXY via yfinance (`DX-Y.NYB`)
 - VIX via yfinance (`^VIX`)
-- US10Y via yfinance (`^TNX`) or FRED API
+- US10Y via yfinance (`^TNX`)
 
 ---
 
@@ -207,12 +207,18 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | **Polygon 2yr data** | **conf=65%** | **112** | **38.4%** | **1.23** | **10.04%** | **+$1,773** |
 | After MIN_ACTIVE=3 (reverted) | conf=65% | 180 | 35.6% | 1.08 | 14.94% | +$1,003 |
 | Stage 2 indicators (broken) | conf=65% | 111 | 31.5% | 0.90 | 15.72% | -$696 |
-| **9-indicator revert (current)** | **conf=65%** | **180** | **36.1%** | **1.09** | **12.27%** | **+$1,030** |
+| **9-indicator revert** | **conf=65%** | **180** | **36.1%** | **1.09** | **12.27%** | **+$1,030** |
+| Stage 6: Risk mgmt (circuit breaker + Half-Kelly) | conf=65% | 214 | ~40% | 1.62 | 10.50% | — |
+| **Stage 5: +LGBM filter (52% CV, informational)** | **conf=65%** | **78** | **69.2%** | **2.38** | **3.89%** | **+$4,321** |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
 (Apr 2024–Mar 2026) hits a 6-month losing streak at the start (Apr–Oct 2024) which depresses PF.
 Sep 2024–Mar 2026 alone is strongly profitable (+$2,884).
+
+**Stage 5 LGBM note:** CV 52.0% (just below 53% gate) → USE_LGBM_FILTER=False. But backtest
+with filter shows dramatic improvement: PF 1.62→2.38, DD 10.50%→3.89%, WR 38%→69.2%.
+LGBM filtered 292/373 signals (78%). Re-evaluate after 150+ real trades available for training.
 
 ---
 
@@ -233,6 +239,7 @@ Sep 2024–Mar 2026 alone is strongly profitable (+$2,884).
 | Stage 2 indicators (Connors/Keltner/Supertrend) | PF 1.23→0.90 | Reverted indicators.py+scoring.py to commit 88c1496 |
 | Parallel Polygon fetch rate-limited (429) | Both fetches time out | Sequential fetch with 300s timeout |
 | Telegram blocked in Pakistan | No alerts | Replaced with Discord webhook |
+| LGBM macro merge bug (index name None) | 0 samples, training fails | Set df.index.name before reset_index() in ml/features.py |
 
 ---
 
@@ -272,9 +279,9 @@ Diagnostic on 277 signals showed:
 - Challenge Fee: $99
 - Configured in: `ACTIVE_PROFILE = "FundedNext_1Step"`
 
-**Current backtest DD: 10.04%** — just over the 10% absolute limit
-- Prop firm simulation uses 8% limit → currently failing
-- Fix planned: HMM regime filter (Stage 4) should bring DD to 6-8%
+**Current backtest DD: 3.89%** (with LGBM filter, informational) / 10.50% (Stage 6 baseline)
+- LGBM filter brings DD well under FundedNext 8% limit but CV gate not met (52% < 53%)
+- USE_LGBM_FILTER=False until re-trained on 150+ real trade outcomes
 
 ---
 
@@ -286,51 +293,12 @@ Diagnostic on 277 signals showed:
 - **Phase 3** — Stability (SQLite, Discord, health check, dedup)
 - **Stage 1** — Environment setup (Arch Linux, Python 3.12)
 - **Stage 2** — REVERTED (Connors RSI/Keltner/Supertrend added noise, PF→0.90, fixed by revert)
+- **Stage 3** — Macro Features Pipeline (DXY/VIX/US10Y via yfinance → ml/features.py)
+- **Stage 4** — HMM Regime Detection (GaussianHMM 3-state on H1, regime-aware sizing)
+- **Stage 5** — LightGBM Classifier (52% CV, gate not met; USE_LGBM_FILTER=False; backtest shows PF 2.38 with filter)
+- **Stage 6** — Risk Management (circuit breaker + Half-Kelly + exits; PF 1.62, DD 10.50%)
 
 ### 📋 REMAINING STAGES
-
-#### Stage 3 — Macro Features Pipeline
-```
-Create data/macro_fetcher.py
-Fetch: DXY, VIX, US10Y via yfinance (free)
-Add to ml/features.py as independent features
-DXY is most important — ~-0.80 correlation with gold
-```
-
-#### Stage 4 — HMM Regime Detection ⭐ HIGHEST PRIORITY
-```
-Library: hmmlearn
-Model: GaussianHMM, 3 states on H1 data
-State 0: Trending low-vol → full trading
-State 1: Ranging medium → half position size
-State 2: Crisis high-vol → no trading
-Expected: DD drops 2-3%, filters ~30% losing trades
-```
-
-#### Stage 5 — LightGBM Classifier
-```
-Independent features (NOT indicator values):
-- Multi-lookback returns (5,15,30,60,120 bars)
-- ATR ratio (ATR7/ATR28)
-- DXY trend flag, VIX level/change
-- Session encoding, calendar flags
-- Rolling Hurst exponent
-Target: 54-57% accuracy (better than 47% current)
-```
-
-#### Stage 6 — Risk Management Overhaul
-```
-Multi-level circuit breaker:
-- 2% daily loss → 50% position size
-- 3% daily loss → high confidence only
-- 4% daily loss → stop for day
-- 8% total DD → 25% size
-
-Half-Kelly position sizing with ATR adjustment
-Friday 20:00 UTC close (weekend gap protection)
-48-bar time exit (stale trade killer)
-Trailing stop at 1R profit
-```
 
 #### Stage 7 — CNN-BiLSTM Deep Learning
 ```
@@ -484,22 +452,26 @@ Sharpe Ratio:   2.0-2.5
 
 ## ML Architecture (Planned)
 
-### Current (Disabled)
-- XGBoost + Random Forest
-- Features: same indicator outputs as scoring (redundant → 47% accuracy)
-- Status: USE_ML_FILTER = False
+### Current State
+- XGBoost + Random Forest: USE_ML_FILTER=False (47% CV, worse than coin flip)
+- LightGBM (Stage 5): trained, USE_LGBM_FILTER=False (52% CV, below 53% gate)
+  - 24 independent features: returns, ATR ratio, DXY/VIX/US10Y, session, Hurst
+  - Top features: dxy_1d_return, us10y_level, dxy_5d_return, vix_level
+  - Backtest WITH filter: PF 2.38, DD 3.89%, WR 69.2% — very promising
+  - Needs 150+ real trades to retrain on trade outcomes (vs price direction)
+- HMM Regime Detector: trained and active (3 states on H1)
 
-### Planned Three-Model Architecture
+### Three-Model Architecture (in progress)
 ```
-Model A: LightGBM — direction classifier
+Model A: LightGBM — direction classifier ✅ BUILT (52% CV, gate not met)
          Independent features (macro, statistical, temporal)
-         Target accuracy: 54-57%
+         Re-evaluate after 150+ real trades
 
-Model B: HMM — regime detector (3 states)
+Model B: HMM — regime detector (3 states) ✅ BUILT & ACTIVE
          Features: log returns + realized vol on H1
          NOT a predictor — a FILTER
 
-Model C: CNN-BiLSTM — deep direction model
+Model C: CNN-BiLSTM — deep direction model (Stage 7)
          60-bar lookback, Conv1D + BiLSTM + Attention
          Target accuracy: 55-58%
          Requires GPU for training (Google Colab)
@@ -523,7 +495,7 @@ Model C: CNN-BiLSTM — deep direction model
 ## Tools & Resources
 - **Data:** Polygon.io (primary), yfinance (fallback)
 - **Alerts:** Discord webhook (primary), Telegram (backup)
-- **ML:** XGBoost, LightGBM (planned), hmmlearn (planned), PyTorch (planned)
+- **ML:** XGBoost, LightGBM (trained, disabled), hmmlearn (active), PyTorch (planned)
 - **Dashboard:** Streamlit
 - **Database:** SQLite
 - **Hosting:** Local PC (future: DigitalOcean VPS via Student Pack)
@@ -532,13 +504,15 @@ Model C: CNN-BiLSTM — deep direction model
 
 ---
 
-## Current Status (2026-03-28)
-**9-indicator system restored. PF 1.09 on current 2yr Polygon window. Ready for Stage 3.**
+## Current Status (2026-03-30)
+**Stages 3–6 complete. LightGBM trained (52% CV, gate not met, filter disabled). Ready for Stage 7.**
 
-Stage 2 regression was caused by adding 4 unvalidated indicators (Connors RSI, Keltner Channels,
-Supertrend, Williams %R) and raising MIN_DOMINANT from 3→4. This degraded signal quality.
-Fix: reverted `analysis/indicators.py` and `analysis/scoring.py` to commit `88c1496`.
+Completed today:
+- Stage 5 LightGBM built with 24 independent features (macro + statistical + temporal)
+- CV 52.0% — just below 53% gate. USE_LGBM_FILTER=False.
+- Backtest WITH filter informational: PF 1.62→2.38, DD 10.50%→3.89%, WR 38%→69.2%
+- LGBM filters 78% of signals — dramatic quality improvement but gate not met
+- Bug fixed: macro merge index name bug (df.index.name=None → reset_index column mismatch)
 
-Note on PF 1.09 vs original 1.23: different market windows. Apr–Oct 2024 was a bad regime
-for this strategy (5 consecutive losing months). Sep 2024–Mar 2026 is strongly profitable.
-The strategy is sound. Next priority: Stage 3 macro features (DXY/VIX) to filter bad regimes.
+Next: Stage 7 CNN-BiLSTM, or optionally retrain LGBM after 150+ real trade outcomes
+accumulated from forward testing.
