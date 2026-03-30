@@ -31,7 +31,7 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from config import Config
-from ml.features import build_features
+from ml.features import build_features, build_lgbm_features
 
 logger = logging.getLogger(__name__)
 
@@ -369,3 +369,227 @@ def invalidate_cache() -> bool:
     Returns True if models reloaded successfully.
     """
     return _ModelCache.reload()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5: LIGHTGBM DIRECTION CLASSIFIER — PREDICTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class LGBMPrediction:
+    """
+    Prediction result from the LightGBM direction classifier.
+
+    Attributes:
+        direction:    "BUY_OK" | "SELL_OK" | "SKIP"
+        probability:  P(profitable) from LightGBM [0.0–1.0]
+        available:    True if model loaded and prediction succeeded
+        reason:       Explanation string
+    """
+    direction:   str   = "SKIP"
+    probability: float = 0.5
+    available:   bool  = False
+    reason:      str   = ""
+
+    def confirms(self, signal_direction: str) -> bool:
+        """
+        Check if LGBM confirms a technical signal direction.
+        LGBM doesn't predict direction — it predicts whether the trade
+        will be profitable. So it confirms if probability >= threshold.
+        """
+        if not self.available:
+            return True  # If not available, don't block
+        return self.probability >= Config.LGBM_MIN_PROBABILITY
+
+    def summary(self) -> str:
+        return (
+            f"LGBM: {self.direction} (P={self.probability:.1%}) | "
+            f"threshold={Config.LGBM_MIN_PROBABILITY:.0%}"
+        )
+
+
+class _LGBMCache:
+    """In-memory cache for the LightGBM model artifacts."""
+    model: object = None
+    scaler: Optional[StandardScaler] = None
+    feature_columns: Optional[list[str]] = None
+    loaded: bool = False
+
+    @classmethod
+    def load(cls) -> bool:
+        model_path = os.path.join(Config.BASE_DIR, Config.LGBM_MODEL_PATH)
+        scaler_path = os.path.join(Config.BASE_DIR, Config.LGBM_SCALER_PATH)
+        cols_path = os.path.join(Config.BASE_DIR, Config.LGBM_FEATURES_PATH)
+
+        try:
+            if not all(os.path.isfile(p) for p in [model_path, scaler_path, cols_path]):
+                missing = [p for p in [model_path, scaler_path, cols_path]
+                           if not os.path.isfile(p)]
+                logger.debug("LGBM model files missing: %s", missing)
+                cls.loaded = False
+                return False
+
+            cls.model = joblib.load(model_path)
+            cls.scaler = joblib.load(scaler_path)
+            cls.feature_columns = joblib.load(cols_path)
+            cls.loaded = True
+
+            logger.info(
+                "LGBM model loaded: %s | %d features",
+                type(cls.model).__name__,
+                len(cls.feature_columns),
+            )
+            return True
+
+        except Exception as exc:
+            logger.exception("Failed to load LGBM model: %s", exc)
+            cls.loaded = False
+            return False
+
+    @classmethod
+    def reload(cls) -> bool:
+        cls.loaded = False
+        return cls.load()
+
+    @classmethod
+    def ensure_loaded(cls) -> bool:
+        if cls.loaded:
+            return True
+        return cls.load()
+
+
+def predict_lgbm(df: pd.DataFrame) -> LGBMPrediction:
+    """
+    Generate an LGBM prediction for the latest candle.
+
+    This predicts P(trade will be profitable), not direction.
+    If P >= LGBM_MIN_PROBABILITY, the trade is allowed.
+
+    Args:
+        df: Processed OHLCV DataFrame (250+ rows for feature warm-up)
+
+    Returns:
+        LGBMPrediction with probability and filter decision.
+    """
+    if not _LGBMCache.ensure_loaded():
+        return LGBMPrediction(
+            available=False,
+            reason="LGBM model not trained — run: venv/bin/python -m ml.trainer"
+        )
+
+    try:
+        feat_df = build_lgbm_features(df, include_target=False, dropna=True)
+    except Exception as exc:
+        logger.exception("LGBM feature engineering failed: %s", exc)
+        return LGBMPrediction(available=False, reason=f"Feature error: {exc}")
+
+    if feat_df.empty:
+        return LGBMPrediction(
+            available=False,
+            reason="LGBM feature matrix empty — insufficient data"
+        )
+
+    # Align columns
+    expected_cols = _LGBMCache.feature_columns
+    missing = set(expected_cols) - set(feat_df.columns)
+    if missing:
+        logger.warning("LGBM prediction: missing features %s — filling with 0", missing)
+        for col in missing:
+            feat_df[col] = 0.0
+
+    X = feat_df[expected_cols].iloc[-1:]
+
+    try:
+        X_scaled = pd.DataFrame(
+            _LGBMCache.scaler.transform(X),
+            columns=X.columns,
+            index=X.index,
+        )
+    except Exception as exc:
+        logger.exception("LGBM scaling failed: %s", exc)
+        return LGBMPrediction(available=False, reason=f"Scaler error: {exc}")
+
+    try:
+        proba = _LGBMCache.model.predict_proba(X_scaled)[0]
+        p_profitable = float(proba[1])  # P(class 1 = profitable)
+
+        if p_profitable >= Config.LGBM_MIN_PROBABILITY:
+            direction = "TRADE_OK"
+            reason = f"P(profitable)={p_profitable:.1%} >= {Config.LGBM_MIN_PROBABILITY:.0%} threshold"
+        else:
+            direction = "SKIP"
+            reason = f"P(profitable)={p_profitable:.1%} < {Config.LGBM_MIN_PROBABILITY:.0%} threshold"
+
+    except Exception as exc:
+        logger.exception("LGBM prediction failed: %s", exc)
+        return LGBMPrediction(available=False, reason=f"Prediction error: {exc}")
+
+    result = LGBMPrediction(
+        direction=direction,
+        probability=p_profitable,
+        available=True,
+        reason=reason,
+    )
+
+    logger.info("LGBM prediction: %s", result.summary())
+    return result
+
+
+def predict_lgbm_batch(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Generate LGBM predictions for ALL rows (for backtesting).
+
+    Returns DataFrame with columns: lgbm_prob, lgbm_pass
+    """
+    if not _LGBMCache.ensure_loaded():
+        logger.error("Cannot run LGBM batch prediction — model not loaded.")
+        return pd.DataFrame()
+
+    feat_df = build_lgbm_features(df, include_target=False, dropna=False)
+
+    valid_mask = ~feat_df.isnull().any(axis=1)
+    feat_valid = feat_df[valid_mask].copy()
+
+    if feat_valid.empty:
+        logger.warning("LGBM batch prediction: no valid rows.")
+        return pd.DataFrame()
+
+    expected_cols = _LGBMCache.feature_columns
+    missing = set(expected_cols) - set(feat_valid.columns)
+    for col in missing:
+        feat_valid[col] = 0.0
+    X = feat_valid[expected_cols]
+
+    X_scaled = pd.DataFrame(
+        _LGBMCache.scaler.transform(X),
+        columns=X.columns,
+        index=X.index,
+    )
+
+    proba = _LGBMCache.model.predict_proba(X_scaled)[:, 1]
+
+    result = pd.DataFrame(index=df.index)
+    result["lgbm_prob"] = np.nan
+    result["lgbm_pass"] = False
+
+    result.loc[feat_valid.index, "lgbm_prob"] = proba
+    result.loc[feat_valid.index, "lgbm_pass"] = proba >= Config.LGBM_MIN_PROBABILITY
+
+    n_pass = result["lgbm_pass"].sum()
+    n_total = len(feat_valid)
+    logger.info(
+        "LGBM batch: %d/%d rows predicted | pass=%d (%.1f%%) skip=%d",
+        n_total, len(df), n_pass, n_pass / n_total * 100 if n_total else 0,
+        n_total - n_pass,
+    )
+    return result
+
+
+def is_lgbm_ready() -> bool:
+    """Check if LGBM model is loaded and ready."""
+    return _LGBMCache.ensure_loaded()
+
+
+def invalidate_lgbm_cache() -> bool:
+    """Force-reload LGBM model from disk."""
+    return _LGBMCache.reload()

@@ -412,16 +412,20 @@ def _add_macro_features(df: pd.DataFrame) -> pd.DataFrame:
                 macro_feat[feat_col] = macro[raw_col]
 
         # As-of merge: for each intraday bar, get the most recent daily macro row
-        # Normalise the bar index to date for merging
-        bar_dates = df.index.normalize()
+        # Normalise the bar index to date for merging (timezone-naive dates)
+        bar_dates = df.index.normalize().tz_localize(None) if df.index.tz else df.index.normalize()
         macro_feat_daily = macro_feat.copy()
-        macro_feat_daily.index = macro_feat_daily.index.normalize()
+        macro_idx = macro_feat_daily.index.normalize()
+        macro_feat_daily.index = macro_idx.tz_localize(None) if macro_idx.tz else macro_idx
 
         # Use merge_asof for efficient alignment
+        idx_name = df.index.name or "datetime"
+        df.index.name = idx_name          # ensure reset_index creates the right column name
         df_reset = df.reset_index()
-        df_reset["_merge_date"] = bar_dates
+        df_reset["_merge_date"] = bar_dates.values
 
-        macro_reset = macro_feat_daily.reset_index().rename(columns={"index": "_merge_date"})
+        macro_reset = macro_feat_daily.reset_index()
+        macro_reset = macro_reset.rename(columns={macro_reset.columns[0]: "_merge_date"})
         # Drop duplicate dates (keep last)
         macro_reset = macro_reset.drop_duplicates(subset="_merge_date", keep="last")
         macro_reset = macro_reset.sort_values("_merge_date")
@@ -434,7 +438,7 @@ def _add_macro_features(df: pd.DataFrame) -> pd.DataFrame:
         )
 
         # Restore original index
-        merged = merged.set_index(df.index.name or "index" if df.index.name else df_reset.columns[0])
+        merged = merged.set_index(idx_name)
         merged = merged.sort_index()
 
         # Copy macro features back to df
@@ -562,6 +566,201 @@ def build_features(
 
     logger.info("Feature matrix: %d rows × %d columns", len(feat), len(feat.columns))
     return feat
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5: INDEPENDENT FEATURES FOR LIGHTGBM
+# These features are INDEPENDENT of the scoring engine indicators.
+# They use only raw OHLCV, macro data, and statistical measures.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _hurst_exponent(series: pd.Series, window: int = 50) -> pd.Series:
+    """
+    Rolling Hurst exponent using rescaled range (R/S) analysis.
+    H > 0.5 → trending, H < 0.5 → mean-reverting, H ≈ 0.5 → random walk.
+    """
+    def _hurst_single(x):
+        if len(x) < 20:
+            return np.nan
+        n = len(x)
+        mean = np.mean(x)
+        deviations = np.cumsum(x - mean)
+        R = np.max(deviations) - np.min(deviations)
+        S = np.std(x, ddof=1)
+        if S == 0 or R == 0:
+            return 0.5
+        # Simple R/S ratio → estimate H via log(R/S) / log(n)
+        return np.log(R / S) / np.log(n)
+
+    return series.rolling(window, min_periods=20).apply(_hurst_single, raw=True)
+
+
+def _add_lgbm_independent_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build features that are INDEPENDENT of the scoring engine.
+    No indicator outputs (RSI, MACD, EMA, etc.) — only raw OHLCV
+    and statistical/structural measures.
+
+    Feature groups:
+      1. Multi-lookback returns (5)
+      2. Volatility features (3)
+      3. Session & temporal encoding (4)
+      4. Price structure (3)
+      5. Hurst exponent (1)
+      6. Macro features (8) — reused from _add_macro_features
+
+    Total: ~24 independent features + 8 macro = ~32
+    """
+    close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    opn = df["open"]
+
+    # ── 1. Multi-lookback returns ─────────────────────────────────────────
+    returns = close.pct_change()
+    for n in [5, 15, 30, 60, 120]:
+        df[f"ret_{n}"] = close.pct_change(n)
+
+    # ── 2. Volatility features ────────────────────────────────────────────
+    # ATR ratio: short-term vs long-term volatility expansion
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr_7 = tr.ewm(span=7, adjust=False).mean()
+    atr_28 = tr.ewm(span=28, adjust=False).mean()
+    df["lgbm_atr_ratio"] = atr_7 / atr_28.replace(0, np.nan)
+
+    # Realized vol ratio: 5-bar vs 20-bar
+    log_ret = np.log(close / close.shift(1))
+    vol_5 = log_ret.rolling(5).std()
+    vol_20 = log_ret.rolling(20).std()
+    df["lgbm_vol_ratio"] = vol_5 / vol_20.replace(0, np.nan)
+
+    # High-low range as % of close (rolling 14-bar avg)
+    bar_range_pct = (high - low) / close
+    df["lgbm_hl_range_pct"] = bar_range_pct.rolling(14).mean()
+
+    # ── 3. Session & temporal encoding ────────────────────────────────────
+    hour = df.index.hour + df.index.minute / 60.0
+    df["lgbm_hour_sin"] = np.sin(2 * np.pi * hour / 24)
+    df["lgbm_hour_cos"] = np.cos(2 * np.pi * hour / 24)
+    df["lgbm_day_of_week"] = df.index.dayofweek.astype(float)
+    # London-NY overlap: 13-17 UTC
+    h = df.index.hour
+    df["lgbm_is_overlap"] = ((h >= 13) & (h < 17)).astype(float)
+
+    # ── 4. Price structure ────────────────────────────────────────────────
+    rolling_high_20 = high.rolling(20).max()
+    rolling_low_20 = low.rolling(20).min()
+    df["lgbm_dist_to_high_20"] = (rolling_high_20 - close) / close
+    df["lgbm_dist_to_low_20"] = (close - rolling_low_20) / close
+    df["lgbm_close_vs_open"] = (close - opn) / opn
+
+    # ── 5. Hurst exponent (rolling 50-bar window) ─────────────────────────
+    df["lgbm_hurst_50"] = _hurst_exponent(log_ret, window=50)
+
+    return df
+
+
+def build_lgbm_features(
+    df: pd.DataFrame,
+    include_target: bool = True,
+    dropna: bool = True,
+    target_source: str = "future_price",
+    trades_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """
+    Build feature matrix for the LightGBM direction classifier.
+
+    Uses ONLY independent features (no indicator outputs).
+    Target variable depends on target_source:
+      - "future_price": binary, 1 if close[t+15] > close[t]
+      - "trade_outcome": binary, 1 if trade was profitable (from backtest CSV)
+
+    Args:
+        df:             Processed M15 OHLCV DataFrame
+        include_target: If True, add target column
+        dropna:         If True, drop rows with any NaN
+        target_source:  "future_price" or "trade_outcome"
+        trades_df:      Backtest trades DataFrame (required if target_source="trade_outcome")
+
+    Returns:
+        DataFrame with independent features + optional "lgbm_target" column.
+    """
+    if df is None or len(df) < 250:
+        logger.error(
+            "build_lgbm_features: Need at least 250 rows, got %d.",
+            len(df) if df is not None else 0
+        )
+        return pd.DataFrame()
+
+    logger.debug("Building LGBM independent features on %d rows…", len(df))
+
+    # Work on a copy — keep OHLCV for feature computation, drop at end
+    feat = df[["open", "high", "low", "close", "volume"]].copy()
+
+    # ── Add independent features ──────────────────────────────────────────
+    feat = _add_lgbm_independent_features(feat)
+
+    # ── Add macro features (DXY, VIX, US10Y — independent of gold price) ─
+    feat = _add_macro_features(feat)
+
+    # ── Target variable ───────────────────────────────────────────────────
+    if include_target:
+        if target_source == "trade_outcome" and trades_df is not None:
+            # Label from backtest trade results: 1 = profitable, 0 = not
+            feat["lgbm_target"] = np.nan
+            for _, trade in trades_df.iterrows():
+                entry_time = pd.Timestamp(trade["entry_time"])
+                if entry_time in feat.index:
+                    feat.loc[entry_time, "lgbm_target"] = (
+                        1.0 if float(trade["pnl_pips"]) > 0 else 0.0
+                    )
+            # Only keep rows that have a trade label
+            if dropna:
+                feat = feat.dropna(subset=["lgbm_target"])
+        else:
+            # Default: future price direction
+            future_close = feat["close"].shift(-Config.ML_FUTURE_CANDLES)
+            feat["lgbm_target"] = (future_close > feat["close"]).astype(float)
+            feat.loc[feat.index[-Config.ML_FUTURE_CANDLES:], "lgbm_target"] = np.nan
+
+    # ── Drop raw OHLCV columns ────────────────────────────────────────────
+    drop_cols = ["open", "high", "low", "close", "volume"]
+    feat = feat.drop(columns=drop_cols, errors="ignore")
+
+    # ── Drop NaN rows ─────────────────────────────────────────────────────
+    if dropna:
+        before = len(feat)
+        feat = feat.replace([np.inf, -np.inf], np.nan)
+        feat = feat.dropna()
+        dropped = before - len(feat)
+        if dropped > 0:
+            logger.debug(
+                "LGBM features: Dropped %d NaN rows. %d rows remain.",
+                dropped, len(feat)
+            )
+
+    logger.info(
+        "LGBM feature matrix: %d rows × %d columns",
+        len(feat), len(feat.columns)
+    )
+    return feat
+
+
+def get_lgbm_feature_columns(df_features: pd.DataFrame) -> list[str]:
+    """Return feature column names for LGBM (everything except lgbm_target)."""
+    return [c for c in df_features.columns if c != "lgbm_target"]
+
+
+def split_lgbm_xy(df_features: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+    """Split LGBM feature DataFrame into X (features) and y (target)."""
+    if "lgbm_target" not in df_features.columns:
+        raise ValueError("DataFrame has no 'lgbm_target' column.")
+    feature_cols = get_lgbm_feature_columns(df_features)
+    return df_features[feature_cols], df_features["lgbm_target"]
 
 
 def get_feature_columns(df_features: pd.DataFrame) -> list[str]:

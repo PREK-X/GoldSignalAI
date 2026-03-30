@@ -106,6 +106,9 @@ class BacktestConfig:
     # ML integration: train models on available data and use for filtering.
     use_ml: bool = True
 
+    # Stage 5: LGBM direction classifier filter
+    use_lgbm: bool = True
+
     # Limit order entry at S/R levels
     use_limit_orders: bool = False
     limit_max_distance_pips: float = 50.0  # max distance from current price to S/R
@@ -1201,6 +1204,39 @@ def run_backtest(
             else:
                 print(f"[Backtest] ML batch ready: {len(ml_batch):,} rows")
 
+    # ── Step 2a: Train & precompute LGBM direction classifier ──────────
+    lgbm_available = False
+    lgbm_batch: Optional[pd.DataFrame] = None
+    if cfg.use_lgbm and Config.USE_LGBM_FILTER:
+        try:
+            from ml.trainer import train_lgbm
+            from ml.predictor import predict_lgbm_batch as _predict_lgbm_batch
+
+            trades_csv = os.path.join(Config.REPORTS_DIR, "backtest_trades.csv")
+            print("[Backtest] Training LGBM direction classifier…")
+            lgbm_result = train_lgbm(m15_processed, save=True, trades_csv=trades_csv)
+            print(f"[Backtest] LGBM CV accuracy: {lgbm_result.cv_accuracy:.1%} "
+                  f"({'PASS' if lgbm_result.gate_passed else 'FAIL'} ≥{Config.LGBM_MIN_CV_ACCURACY:.0%})")
+
+            if lgbm_result.saved:
+                from ml.predictor import invalidate_lgbm_cache
+                invalidate_lgbm_cache()
+                print("[Backtest] Precomputing LGBM predictions for all bars (batch)…")
+                lgbm_batch = _predict_lgbm_batch(m15_processed)
+                if lgbm_batch.empty:
+                    print("[Backtest] LGBM batch prediction failed — LGBM filter disabled.")
+                else:
+                    n_pass = lgbm_batch["lgbm_pass"].sum()
+                    n_total = lgbm_batch["lgbm_prob"].notna().sum()
+                    print(f"[Backtest] LGBM batch ready: {n_total:,} rows | "
+                          f"pass={n_pass:,} ({n_pass / n_total * 100:.1f}%) "
+                          f"skip={n_total - n_pass:,}")
+                    lgbm_available = True
+        except ImportError as exc:
+            print(f"[Backtest] LGBM not available: {exc}")
+        except Exception as exc:
+            print(f"[Backtest] LGBM training failed: {exc}")
+
     # ── Step 2b: Precompute indicator time-series for all bars ─────────
     print("[Backtest] Precomputing M15 indicators (full dataset)...")
     m15_precomp = PrecomputedIndicators(m15_processed)
@@ -1272,6 +1308,7 @@ def run_backtest(
 
     signals_found = 0
     ml_filtered = 0
+    lgbm_filtered = 0  # count of signals filtered by LGBM classifier
     regime_filtered = 0  # count of signals suppressed by CRISIS regime
     circuit_breaker_paused = 0  # count of signals blocked by circuit breaker
     limit_orders_placed = 0    # count of limit orders placed
@@ -1456,6 +1493,14 @@ def run_backtest(
                 ml_filtered += 1
                 continue
 
+        # ── LGBM filter — use precomputed batch (O(1) lookup) ────────
+        if lgbm_available and lgbm_batch is not None:
+            lgbm_row = lgbm_batch.iloc[i]
+            lgbm_prob_available = not pd.isna(lgbm_row["lgbm_prob"])
+            if lgbm_prob_available and not bool(lgbm_row["lgbm_pass"]):
+                lgbm_filtered += 1
+                continue
+
         # ── HMM regime filter ─────────────────────────────────────────
         bar_regime_state = 1  # default RANGING
         bar_regime_label = "RANGING"
@@ -1583,12 +1628,14 @@ def run_backtest(
 
     if cfg.use_limit_orders:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| LGBM filtered: {lgbm_filtered} "
               f"| Regime filtered: {regime_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
               f"| CB blocked: {circuit_breaker_paused} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
+              f"| LGBM filtered: {lgbm_filtered} "
               f"| Regime filtered: {regime_filtered} "
               f"| CB blocked: {circuit_breaker_paused} | Trades taken: {len(trades)}")
     print(f"[Backtest] Exits — Friday: {exit_friday_close_count} | "

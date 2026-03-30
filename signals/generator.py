@@ -30,6 +30,7 @@ from config import Config
 from analysis.multi_timeframe import analyse, MultiTimeframeResult
 from analysis.scoring import SignalScore
 from ml.predictor import predict, MLPrediction, is_model_ready
+from ml.predictor import predict_lgbm, LGBMPrediction, is_lgbm_ready
 from signals.risk_manager import calculate_risk, RiskParameters
 
 logger = logging.getLogger(__name__)
@@ -199,6 +200,21 @@ def generate_signal(
                 logger.info("RANGING regime — position size will be scaled to %.1fx", regime_multiplier)
         except Exception as exc:
             logger.warning("Regime filter failed (continuing without): %s", exc)
+
+    # ── Step 3b: LGBM profitability filter ────────────────────────────────
+    lgbm_pred = LGBMPrediction(available=False, reason="LGBM filter disabled")
+    if Config.USE_LGBM_FILTER and direction in ("BUY", "SELL") and mtf.m15.df is not None:
+        try:
+            lgbm_pred = predict_lgbm(mtf.m15.df)
+            if lgbm_pred.available and not lgbm_pred.confirms(direction):
+                logger.info(
+                    "LGBM filter: P(profitable)=%.1f%% < %.0f%% → forcing WAIT",
+                    lgbm_pred.probability * 100, Config.LGBM_MIN_PROBABILITY * 100,
+                )
+                direction = "WAIT"
+                confidence = 0.0
+        except Exception as exc:
+            logger.warning("LGBM prediction failed (continuing without): %s", exc)
 
     # ── Step 4: News pause override ───────────────────────────────────────
     is_paused = news_paused

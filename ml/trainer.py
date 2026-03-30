@@ -51,7 +51,17 @@ except ImportError:
     XGB_AVAILABLE = False
 
 from config import Config
-from ml.features import build_features, get_feature_columns, split_xy
+from ml.features import (
+    build_features, get_feature_columns, split_xy,
+    build_lgbm_features, get_lgbm_feature_columns, split_lgbm_xy,
+)
+
+try:
+    import lightgbm as lgb
+    LGBM_AVAILABLE = True
+except ImportError:
+    lgb = None
+    LGBM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +460,8 @@ def get_model_status() -> dict:
         except Exception:
             pass
 
+    lgbm_path = os.path.join(Config.BASE_DIR, Config.LGBM_MODEL_PATH)
+
     return {
         "xgb_model_exists":    xgb_exists,
         "rf_model_exists":     rf_exists,
@@ -458,4 +470,325 @@ def get_model_status() -> dict:
         "last_training":       last_train,
         "xgb_model_path":      xgb_path,
         "rf_model_path":       rf_path,
+        "lgbm_model_exists":   os.path.isfile(lgbm_path),
+        "lgbm_model_path":     lgbm_path,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5: LIGHTGBM DIRECTION CLASSIFIER
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LGBMTrainingResult:
+    """Holds the outcome of a LightGBM training run."""
+
+    def __init__(self):
+        self.cv_accuracy:      float = 0.0
+        self.fold_accuracies:  list[float] = []
+        self.fold_sizes:       list[int] = []
+        self.n_samples:        int   = 0
+        self.n_features:       int   = 0
+        self.training_time_s:  float = 0.0
+        self.timestamp:        str   = ""
+        self.saved:            bool  = False
+        self.rejected:         bool  = False
+        self.reject_reason:    str   = ""
+        self.feature_importances: dict[str, float] = {}
+        self.gate_passed:      bool  = False
+
+    def summary(self) -> str:
+        return (
+            f"LGBM CV acc={self.cv_accuracy:.1%} | "
+            f"folds={self.fold_accuracies} | "
+            f"{self.n_samples} samples, {self.n_features} features, "
+            f"{self.training_time_s:.1f}s | "
+            f"gate={'PASSED' if self.gate_passed else 'FAILED'}"
+        )
+
+
+def _build_lgbm():
+    """Create a LightGBM classifier with Config hyperparameters."""
+    if not LGBM_AVAILABLE:
+        raise ImportError("lightgbm is not installed. Run: pip install lightgbm>=4.0.0")
+    return lgb.LGBMClassifier(
+        n_estimators=Config.LGBM_N_ESTIMATORS,
+        learning_rate=Config.LGBM_LEARNING_RATE,
+        max_depth=Config.LGBM_MAX_DEPTH,
+        min_child_samples=Config.LGBM_MIN_CHILD_SAMPLES,
+        subsample=Config.LGBM_SUBSAMPLE,
+        colsample_bytree=Config.LGBM_COLSAMPLE,
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1,
+        verbose=-1,
+    )
+
+
+def train_lgbm(
+    df: pd.DataFrame,
+    save: bool = True,
+    trades_csv: Optional[str] = None,
+) -> LGBMTrainingResult:
+    """
+    Train the LightGBM direction classifier using walk-forward cross-validation.
+
+    Uses ONLY independent features (no indicator outputs).
+    The 53% CV accuracy gate must be passed for the model to be saved and enabled.
+
+    Args:
+        df:         Processed M15 OHLCV DataFrame (2+ years)
+        save:       If True, persist model to Config.LGBM_MODEL_PATH
+        trades_csv: Path to backtest trades CSV for trade-outcome labelling.
+                    If None, uses future price direction as target.
+
+    Returns:
+        LGBMTrainingResult with accuracy metrics and feature importances.
+    """
+    if not LGBM_AVAILABLE:
+        result = LGBMTrainingResult()
+        result.rejected = True
+        result.reject_reason = "lightgbm not installed"
+        return result
+
+    result = LGBMTrainingResult()
+    result.timestamp = datetime.now(timezone.utc).isoformat()
+    t_start = time.time()
+
+    # ── Step 1: Build independent features ────────────────────────────────
+    logger.info("Building LGBM independent features…")
+
+    trades_df = None
+    target_source = "future_price"
+    if trades_csv and os.path.isfile(trades_csv):
+        try:
+            trades_df = pd.read_csv(trades_csv)
+            if len(trades_df) >= 150:
+                target_source = "trade_outcome"
+                logger.info("Using trade outcomes from %s (%d trades)", trades_csv, len(trades_df))
+            else:
+                logger.info(
+                    "Only %d trades in CSV (need 150+ for CV) — using future_price target instead",
+                    len(trades_df)
+                )
+                trades_df = None
+        except Exception as exc:
+            logger.warning("Could not load trades CSV: %s — falling back to future_price", exc)
+
+    feat_df = build_lgbm_features(
+        df,
+        include_target=True,
+        dropna=True,
+        target_source=target_source,
+        trades_df=trades_df,
+    )
+
+    if len(feat_df) < 100:
+        result.rejected = True
+        result.reject_reason = f"Only {len(feat_df)} samples after feature engineering (need 100+)"
+        logger.error(result.reject_reason)
+        return result
+
+    X, y = split_lgbm_xy(feat_df)
+    result.n_samples = len(X)
+    result.n_features = X.shape[1]
+
+    logger.info(
+        "LGBM training data: %d samples × %d features | target balance: %.1f%% positive",
+        len(X), X.shape[1], y.mean() * 100
+    )
+
+    # ── Step 2: Scale features ────────────────────────────────────────────
+    scaler = StandardScaler()
+    X_scaled = pd.DataFrame(
+        scaler.fit_transform(X),
+        columns=X.columns,
+        index=X.index,
+    )
+
+    # ── Step 3: Walk-forward cross-validation ─────────────────────────────
+    logger.info("Running walk-forward cross-validation (5 folds)…")
+    n_splits = Config.ML_WALK_FORWARD_SPLITS
+    min_train_rows = 200
+
+    splits = _walk_forward_cv(X_scaled, y, n_splits=n_splits, min_train_rows=min_train_rows)
+
+    fold_accs: list[float] = []
+    fold_sizes: list[int] = []
+    for i, (train_idx, test_idx) in enumerate(splits):
+        if len(test_idx) < 30:
+            logger.debug("  Fold %d: only %d test samples (< 30 min), skipping", i + 1, len(test_idx))
+            continue
+
+        X_train = X_scaled.iloc[train_idx]
+        y_train = y.iloc[train_idx]
+        X_test = X_scaled.iloc[test_idx]
+        y_test = y.iloc[test_idx]
+
+        model_cv = _build_lgbm()
+        model_cv.fit(X_train, y_train)
+
+        y_pred = model_cv.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        fold_accs.append(acc)
+        fold_sizes.append(len(test_idx))
+        logger.info(
+            "  Fold %d: train=%d test=%d acc=%.1f%%",
+            i + 1, len(train_idx), len(test_idx), acc * 100
+        )
+
+    result.fold_accuracies = fold_accs
+    result.fold_sizes = fold_sizes
+    mean_cv_acc = np.mean(fold_accs) if fold_accs else 0.0
+    result.cv_accuracy = mean_cv_acc
+
+    logger.info(
+        "Walk-forward CV: %.1f%% mean accuracy across %d valid folds",
+        mean_cv_acc * 100, len(fold_accs)
+    )
+
+    # ── Step 4: Check 53% accuracy gate ───────────────────────────────────
+    result.gate_passed = mean_cv_acc >= Config.LGBM_MIN_CV_ACCURACY
+    if not result.gate_passed:
+        logger.warning(
+            "LGBM CV accuracy %.1f%% < %.0f%% gate — model will be saved "
+            "but USE_LGBM_FILTER should remain False.",
+            mean_cv_acc * 100, Config.LGBM_MIN_CV_ACCURACY * 100,
+        )
+
+    # ── Step 5: Train final model on ALL data ─────────────────────────────
+    logger.info("Training final LGBM model on all %d samples…", len(X_scaled))
+    final_model = _build_lgbm()
+    final_model.fit(X_scaled, y)
+
+    # Feature importances
+    importances = dict(zip(X.columns, final_model.feature_importances_))
+    sorted_imp = dict(sorted(importances.items(), key=lambda x: x[1], reverse=True))
+    result.feature_importances = sorted_imp
+
+    logger.info("Top 10 feature importances:")
+    for feat_name, imp in list(sorted_imp.items())[:10]:
+        logger.info("  %-25s %d", feat_name, imp)
+
+    # ── Step 6: Save to disk ──────────────────────────────────────────────
+    if save:
+        os.makedirs(Config.MODELS_DIR, exist_ok=True)
+
+        model_path = os.path.join(Config.BASE_DIR, Config.LGBM_MODEL_PATH)
+        joblib.dump(final_model, model_path)
+        result.saved = True
+        logger.info("LGBM model saved → %s", model_path)
+
+        scaler_path = os.path.join(Config.BASE_DIR, Config.LGBM_SCALER_PATH)
+        joblib.dump(scaler, scaler_path)
+        logger.info("LGBM scaler saved → %s", scaler_path)
+
+        cols_path = os.path.join(Config.BASE_DIR, Config.LGBM_FEATURES_PATH)
+        joblib.dump(list(X.columns), cols_path)
+        logger.info("LGBM feature columns saved → %s", cols_path)
+
+    result.training_time_s = time.time() - t_start
+    logger.info("LGBM training complete: %s", result.summary())
+
+    # Append to training log
+    _log_lgbm_training_result(result)
+
+    return result
+
+
+def _log_lgbm_training_result(result: LGBMTrainingResult) -> None:
+    """Append LGBM training metrics to the ML training log file."""
+    try:
+        os.makedirs(os.path.dirname(Config.ML_TRAINING_LOG), exist_ok=True)
+        with open(Config.ML_TRAINING_LOG, "a") as f:
+            f.write(
+                f"{result.timestamp} | LGBM "
+                f"CV={result.cv_accuracy:.3f} | "
+                f"folds={result.fold_accuracies} | "
+                f"gate={'PASS' if result.gate_passed else 'FAIL'} | "
+                f"samples={result.n_samples} features={result.n_features} | "
+                f"time={result.training_time_s:.1f}s | "
+                f"saved={result.saved}\n"
+            )
+    except Exception as exc:
+        logger.warning("Could not write LGBM training log: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLI ENTRY POINT — run with: venv/bin/python -m ml.trainer
+# ─────────────────────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    print("=" * 60)
+    print(" GoldSignalAI — LightGBM Direction Classifier Training")
+    print("=" * 60)
+
+    # Fetch historical data
+    print("\nFetching 2yr M15 data from Polygon…")
+    try:
+        from data.fetcher import fetch_historical
+        m15_df = fetch_historical(symbol=Config.SYMBOL, timeframe="M15", years=2)
+    except Exception as exc:
+        print(f"FAILED to fetch data: {exc}")
+        sys.exit(1)
+
+    if m15_df is None or m15_df.empty:
+        print("No data returned. Check API key.")
+        sys.exit(1)
+
+    print(f"Got {len(m15_df):,} M15 bars")
+
+    # Process data
+    from data.processor import process
+    m15_processed = process(m15_df, timeframe="M15", label="LGBM_TRAIN")
+    if m15_processed is None or m15_processed.empty:
+        print("Data processing failed.")
+        sys.exit(1)
+
+    # Fetch macro data for full training date range
+    print("\nFetching macro data (DXY, VIX, US10Y) for full training range…")
+    try:
+        from data.macro_fetcher import fetch_and_cache_macro
+        macro_result = fetch_and_cache_macro(years=3)
+        for name, count in macro_result.items():
+            print(f"  {name}: {count} daily bars cached")
+    except Exception as exc:
+        print(f"WARNING: Macro data fetch failed: {exc}")
+
+    # Train
+    trades_csv = os.path.join(Config.REPORTS_DIR, "backtest_trades.csv")
+    print(f"\nTraining LGBM classifier…")
+    print(f"  Trades CSV: {trades_csv}")
+    print(f"  CV accuracy gate: {Config.LGBM_MIN_CV_ACCURACY:.0%}")
+
+    result = train_lgbm(m15_processed, save=True, trades_csv=trades_csv)
+
+    # Report
+    print("\n" + "=" * 60)
+    print(" TRAINING RESULTS")
+    print("=" * 60)
+    print(f"  Samples:        {result.n_samples:,}")
+    print(f"  Features:       {result.n_features}")
+    print(f"  CV Accuracy:    {result.cv_accuracy:.1%}")
+    print(f"  Per-fold:       {[f'{a:.1%}' for a in result.fold_accuracies]}")
+    print(f"  Per-fold sizes: {result.fold_sizes}")
+    print(f"  Gate (≥{Config.LGBM_MIN_CV_ACCURACY:.0%}):    {'✅ PASSED' if result.gate_passed else '❌ FAILED'}")
+    print(f"  Training time:  {result.training_time_s:.1f}s")
+    print(f"  Model saved:    {result.saved}")
+
+    if result.feature_importances:
+        print(f"\n  Top 10 Feature Importances:")
+        for i, (feat_name, imp) in enumerate(list(result.feature_importances.items())[:10]):
+            print(f"    {i+1:2d}. {feat_name:30s} {imp}")
+
+    if result.gate_passed:
+        print(f"\n  ✅ Set USE_LGBM_FILTER = True in config.py to enable live filtering.")
+    else:
+        print(f"\n  ❌ CV accuracy below {Config.LGBM_MIN_CV_ACCURACY:.0%} — "
+              f"USE_LGBM_FILTER remains False.")

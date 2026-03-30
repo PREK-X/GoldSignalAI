@@ -269,6 +269,22 @@ class Config:
     RF_N_ESTIMATORS = 300
     RF_MAX_DEPTH    = 10
 
+    # ── LightGBM (Stage 5) ───────────────────────────────────────────────
+    USE_LGBM_FILTER       = False       # Enable only if walk-forward CV >= 53%
+    LGBM_MIN_PROBABILITY  = 0.55        # Minimum P(profitable) to allow trade
+    LGBM_MIN_CV_ACCURACY  = 0.53        # Gate: mean CV accuracy must exceed this
+    LGBM_MODEL_PATH       = "models/lgbm_direction.pkl"
+    LGBM_SCALER_PATH      = "models/lgbm_scaler.pkl"
+    LGBM_FEATURES_PATH    = "models/lgbm_feature_columns.joblib"
+
+    # LightGBM hyperparameters
+    LGBM_N_ESTIMATORS     = 200
+    LGBM_LEARNING_RATE    = 0.05
+    LGBM_MAX_DEPTH        = 4
+    LGBM_MIN_CHILD_SAMPLES = 20
+    LGBM_SUBSAMPLE        = 0.8
+    LGBM_COLSAMPLE        = 0.8
+
     # ── News Filter ───────────────────────────────────────────────────────────
     NEWS_PAUSE_MINUTES_BEFORE = 30      # Pause N minutes before high-impact news
     NEWS_PAUSE_MINUTES_AFTER  = 30      # Resume N minutes after news
