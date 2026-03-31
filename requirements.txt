@@ -15,6 +15,7 @@ ta>=0.11.0                   # Additional indicator library
 # ── Machine Learning ──────────────────────────────────────
 xgboost>=2.0.0               # Primary ML classifier
 lightgbm>=4.0.0              # Stage 5: LightGBM direction classifier
+tensorflow>=2.21.0           # Stage 7: CNN-BiLSTM deep model
 scikit-learn>=1.3.0          # Random Forest + walk-forward validation
 joblib>=1.3.0                # Model persistence
 

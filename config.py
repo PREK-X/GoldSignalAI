@@ -285,6 +285,14 @@ class Config:
     LGBM_SUBSAMPLE        = 0.8
     LGBM_COLSAMPLE        = 0.8
 
+    # ── Deep Model / CNN-BiLSTM (Stage 7) ───────────────────────────────
+    USE_DEEP_FILTER       = False       # Enable only if test accuracy >= 54%
+    DEEP_MODEL_PATH       = "models/deep_model.keras"
+    DEEP_SCALER_PATH      = "models/deep_scaler.pkl"
+    DEEP_LOOKBACK         = 60          # 60-bar sliding window
+    DEEP_ACCURACY_GATE    = 0.54        # Gate: test accuracy must exceed this
+    DEEP_MIN_CONFIDENCE   = 0.60        # P(up) threshold to confirm BUY / (1-this) for SELL
+
     # ── News Filter ───────────────────────────────────────────────────────────
     NEWS_PAUSE_MINUTES_BEFORE = 30      # Pause N minutes before high-impact news
     NEWS_PAUSE_MINUTES_AFTER  = 30      # Resume N minutes after news

@@ -201,7 +201,25 @@ def generate_signal(
         except Exception as exc:
             logger.warning("Regime filter failed (continuing without): %s", exc)
 
-    # ── Step 3b: LGBM profitability filter ────────────────────────────────
+    # ── Step 3b: Deep model direction filter ─────────────────────────────
+    if Config.USE_DEEP_FILTER and direction in ("BUY", "SELL") and mtf.m15.df is not None:
+        try:
+            from ml.deep_predictor import predict_deep, is_deep_ready
+            from ml.deep_features import build_deep_features
+            if is_deep_ready():
+                deep_feat = build_deep_features(mtf.m15.df)
+                deep_pred = predict_deep(deep_feat, len(deep_feat) - 1)
+                if deep_pred.available and not deep_pred.confirms(direction):
+                    logger.info(
+                        "Deep filter: P(up)=%.1f%% does not confirm %s → forcing WAIT",
+                        deep_pred.probability * 100, direction,
+                    )
+                    direction = "WAIT"
+                    confidence = 0.0
+        except Exception as exc:
+            logger.warning("Deep model prediction failed (continuing without): %s", exc)
+
+    # ── Step 3c: LGBM profitability filter ────────────────────────────────
     lgbm_pred = LGBMPrediction(available=False, reason="LGBM filter disabled")
     if Config.USE_LGBM_FILTER and direction in ("BUY", "SELL") and mtf.m15.df is not None:
         try:

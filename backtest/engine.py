@@ -109,6 +109,9 @@ class BacktestConfig:
     # Stage 5: LGBM direction classifier filter
     use_lgbm: bool = True
 
+    # Stage 7: CNN-BiLSTM deep model filter
+    use_deep: bool = True
+
     # Limit order entry at S/R levels
     use_limit_orders: bool = False
     limit_max_distance_pips: float = 50.0  # max distance from current price to S/R
@@ -1237,6 +1240,40 @@ def run_backtest(
         except Exception as exc:
             print(f"[Backtest] LGBM training failed: {exc}")
 
+    # ── Step 2a2: Train & precompute CNN-BiLSTM deep model ──────────────
+    deep_available = False
+    deep_batch: Optional[pd.DataFrame] = None
+    if cfg.use_deep and Config.USE_DEEP_FILTER:
+        try:
+            from ml.deep_features import build_deep_features
+            from ml.deep_predictor import predict_deep_batch, invalidate_deep_cache
+            from data.macro_fetcher import get_macro_series
+
+            print("[Backtest] Building deep features for CNN-BiLSTM…")
+            macro_df = None
+            try:
+                macro_df = get_macro_series()
+            except Exception:
+                pass
+            deep_feat = build_deep_features(m15_processed, macro_df=macro_df)
+
+            print("[Backtest] Loading deep model and running batch prediction…")
+            invalidate_deep_cache()
+            deep_batch = predict_deep_batch(deep_feat, m15_processed["close"], Config.DEEP_LOOKBACK)
+            if deep_batch.empty:
+                print("[Backtest] Deep batch prediction failed — deep filter disabled.")
+            else:
+                n_buy = deep_batch["deep_pass_buy"].sum()
+                n_sell = deep_batch["deep_pass_sell"].sum()
+                n_total = deep_batch["deep_prob"].notna().sum()
+                print(f"[Backtest] Deep batch ready: {n_total:,} rows | "
+                      f"buy_pass={n_buy:,} sell_pass={n_sell:,}")
+                deep_available = True
+        except ImportError as exc:
+            print(f"[Backtest] Deep model not available: {exc}")
+        except Exception as exc:
+            print(f"[Backtest] Deep model failed: {exc}")
+
     # ── Step 2b: Precompute indicator time-series for all bars ─────────
     print("[Backtest] Precomputing M15 indicators (full dataset)...")
     m15_precomp = PrecomputedIndicators(m15_processed)
@@ -1309,6 +1346,7 @@ def run_backtest(
     signals_found = 0
     ml_filtered = 0
     lgbm_filtered = 0  # count of signals filtered by LGBM classifier
+    deep_filtered = 0  # count of signals filtered by deep model
     regime_filtered = 0  # count of signals suppressed by CRISIS regime
     circuit_breaker_paused = 0  # count of signals blocked by circuit breaker
     limit_orders_placed = 0    # count of limit orders placed
@@ -1501,6 +1539,18 @@ def run_backtest(
                 lgbm_filtered += 1
                 continue
 
+        # ── Deep model filter — use precomputed batch (O(1) lookup) ──
+        if deep_available and deep_batch is not None:
+            deep_row = deep_batch.iloc[i]
+            deep_prob_available = not pd.isna(deep_row["deep_prob"])
+            if deep_prob_available:
+                if direction == "BUY" and not bool(deep_row["deep_pass_buy"]):
+                    deep_filtered += 1
+                    continue
+                if direction == "SELL" and not bool(deep_row["deep_pass_sell"]):
+                    deep_filtered += 1
+                    continue
+
         # ── HMM regime filter ─────────────────────────────────────────
         bar_regime_state = 1  # default RANGING
         bar_regime_label = "RANGING"
@@ -1628,14 +1678,14 @@ def run_backtest(
 
     if cfg.use_limit_orders:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
-              f"| LGBM filtered: {lgbm_filtered} "
+              f"| LGBM filtered: {lgbm_filtered} | Deep filtered: {deep_filtered} "
               f"| Regime filtered: {regime_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
               f"| CB blocked: {circuit_breaker_paused} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
-              f"| LGBM filtered: {lgbm_filtered} "
+              f"| LGBM filtered: {lgbm_filtered} | Deep filtered: {deep_filtered} "
               f"| Regime filtered: {regime_filtered} "
               f"| CB blocked: {circuit_breaker_paused} | Trades taken: {len(trades)}")
     print(f"[Backtest] Exits — Friday: {exit_friday_close_count} | "
