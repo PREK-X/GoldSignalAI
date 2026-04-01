@@ -285,6 +285,13 @@ class Config:
     LGBM_SUBSAMPLE        = 0.8
     LGBM_COLSAMPLE        = 0.8
 
+    # ── Meta-Decision Layer (Stage 8) ────────────────────────────────
+    META_LGBM_BLOCK_LOW    = 0.40   # LGBM P(UP) below this blocks BUY
+    META_LGBM_BLOCK_HIGH   = 0.60   # LGBM P(UP) above this blocks SELL
+    META_CONFIDENCE_BOOST  = 5.0    # % boost when HMM=TRENDING + LGBM agrees
+    META_CONFIDENCE_PEN    = 5.0    # % penalty when HMM=RANGING
+    META_MAX_SESSION_LOSS  = 2      # consecutive losses before session skip
+
     # ── Deep Model / CNN-BiLSTM (Stage 7) ───────────────────────────────
     USE_DEEP_FILTER       = False       # Enable only if test accuracy >= 54%
     DEEP_MODEL_PATH       = "models/deep_model.keras"

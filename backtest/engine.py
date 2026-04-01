@@ -294,6 +294,14 @@ class BacktestResult:
     exit_time_48bar: int = 0
     exit_trailing_stop: int = 0
 
+    # Stage 8: meta-decision stats
+    meta_blocked_hmm_crisis: int = 0
+    meta_blocked_lgbm_vote: int = 0
+    meta_blocked_session_loss: int = 0
+    meta_blocked_confidence: int = 0
+    meta_boosted: int = 0
+    meta_avg_position_mult: float = 0.0
+
     def summary(self) -> str:
         """Human-readable summary string."""
         lines = [
@@ -340,6 +348,17 @@ class BacktestResult:
                 lines.append(f"   {label:12s} {pct:5.1f}%")
             if self.regime_filtered > 0:
                 lines.append(f"   Signals filtered by CRISIS: {self.regime_filtered}")
+        meta_total = (self.meta_blocked_hmm_crisis + self.meta_blocked_lgbm_vote
+                      + self.meta_blocked_session_loss + self.meta_blocked_confidence)
+        if meta_total > 0 or self.meta_boosted > 0:
+            lines.append(f"{'─' * 50}")
+            lines.append(f" Meta-Decision Layer (Stage 8):")
+            lines.append(f"   Blocked by HMM CRISIS:      {self.meta_blocked_hmm_crisis}")
+            lines.append(f"   Blocked by LGBM soft vote:   {self.meta_blocked_lgbm_vote}")
+            lines.append(f"   Blocked by session losses:   {self.meta_blocked_session_loss}")
+            lines.append(f"   Blocked by confidence adj:   {self.meta_blocked_confidence}")
+            lines.append(f"   Boosted by HMM+LGBM agree:  {self.meta_boosted}")
+            lines.append(f"   Avg position size mult:      {self.meta_avg_position_mult:.2f}")
         lines.append(f"{'═' * 50}")
         return "\n".join(line for line in lines if line)
 
@@ -1208,15 +1227,16 @@ def run_backtest(
                 print(f"[Backtest] ML batch ready: {len(ml_batch):,} rows")
 
     # ── Step 2a: Train & precompute LGBM direction classifier ──────────
+    # Stage 8: Always train LGBM for meta-decision soft vote (ignores USE_LGBM_FILTER)
     lgbm_available = False
     lgbm_batch: Optional[pd.DataFrame] = None
-    if cfg.use_lgbm and Config.USE_LGBM_FILTER:
+    if cfg.use_lgbm:
         try:
             from ml.trainer import train_lgbm
             from ml.predictor import predict_lgbm_batch as _predict_lgbm_batch
 
             trades_csv = os.path.join(Config.REPORTS_DIR, "backtest_trades.csv")
-            print("[Backtest] Training LGBM direction classifier…")
+            print("[Backtest] Training LGBM direction classifier (meta-decision soft vote)…")
             lgbm_result = train_lgbm(m15_processed, save=True, trades_csv=trades_csv)
             print(f"[Backtest] LGBM CV accuracy: {lgbm_result.cv_accuracy:.1%} "
                   f"({'PASS' if lgbm_result.gate_passed else 'FAIL'} ≥{Config.LGBM_MIN_CV_ACCURACY:.0%})")
@@ -1227,7 +1247,7 @@ def run_backtest(
                 print("[Backtest] Precomputing LGBM predictions for all bars (batch)…")
                 lgbm_batch = _predict_lgbm_batch(m15_processed)
                 if lgbm_batch.empty:
-                    print("[Backtest] LGBM batch prediction failed — LGBM filter disabled.")
+                    print("[Backtest] LGBM batch prediction failed — meta LGBM vote disabled.")
                 else:
                     n_pass = lgbm_batch["lgbm_pass"].sum()
                     n_total = lgbm_batch["lgbm_prob"].notna().sum()
@@ -1354,6 +1374,20 @@ def run_backtest(
     limit_orders_expired = 0   # count of limit orders expired
     limit_no_sr = 0            # count of signals skipped (no S/R within range)
 
+    # Stage 8: meta-decision tracking
+    from signals.meta_decision import MetaDecision
+    meta = MetaDecision()
+    meta_blocked_hmm = 0
+    meta_blocked_lgbm = 0
+    meta_blocked_session = 0
+    meta_blocked_confidence = 0
+    meta_boosted = 0
+    meta_position_mults: list[float] = []
+
+    # Session consecutive loss tracking (Rule 4)
+    session_consecutive_losses = 0
+    current_session_day: Optional[str] = None  # track which day's session we're in
+
     # Stage 6: PnL-based circuit breaker (replaces old consecutive-loss breaker)
     cb = CircuitBreaker()
     daily_open_balance = cfg.account_balance
@@ -1388,6 +1422,13 @@ def run_backtest(
             current_day_str = this_day
             running_balance = cfg.account_balance + sum(t.pnl_usd for t in trades)
             daily_open_balance = running_balance
+
+        # ── Stage 8: Reset session consecutive losses at NY open (13:00 UTC) ──
+        bar_hour = bar_time.hour if hasattr(bar_time, 'hour') else 0
+        session_day_key = f"{this_day}_{bar_hour >= 13}"
+        if session_day_key != current_session_day and bar_hour >= 13:
+            current_session_day = session_day_key
+            session_consecutive_losses = 0
             if running_balance > peak_balance:
                 peak_balance = running_balance
 
@@ -1438,6 +1479,7 @@ def run_backtest(
             if should_friday_close(bar_time):
                 _close_trade_at_market(open_trade, bar_close, bar_time, "FRIDAY_CLOSE")
                 trades.append(open_trade)
+                session_consecutive_losses = session_consecutive_losses + 1 if not open_trade.is_winner else 0
                 exit_friday_close_count += 1
                 open_trade = None
                 bars_since_last_trade = 0
@@ -1447,6 +1489,7 @@ def run_backtest(
             if should_time_exit(bars_held):
                 _close_trade_at_market(open_trade, bar_close, bar_time, "TIME_EXIT_48")
                 trades.append(open_trade)
+                session_consecutive_losses = session_consecutive_losses + 1 if not open_trade.is_winner else 0
                 exit_time_48bar_count += 1
                 open_trade = None
                 bars_since_last_trade = 0
@@ -1471,6 +1514,7 @@ def run_backtest(
                 if trail_hit:
                     _close_trade_at_market(open_trade, open_trade.trailing_stop, bar_time, "TRAIL_STOP")
                     trades.append(open_trade)
+                    session_consecutive_losses = session_consecutive_losses + 1 if not open_trade.is_winner else 0
                     exit_trailing_stop_count += 1
                     open_trade = None
                     bars_since_last_trade = 0
@@ -1480,6 +1524,7 @@ def run_backtest(
             closed = _check_exit(open_trade, bar_high, bar_low, bar_time)
             if closed:
                 trades.append(open_trade)
+                session_consecutive_losses = session_consecutive_losses + 1 if not open_trade.is_winner else 0
                 open_trade = None
                 bars_since_last_trade = 0
                 continue
@@ -1519,52 +1564,50 @@ def run_backtest(
         risk = analysis.risk
         signals_found += 1
 
-        # ── ML filter — use precomputed batch (O(1) lookup) ───────────
-        if ml_available and ml_batch is not None:
-            ml_row = ml_batch.iloc[i]
-            pred_available = not pd.isna(ml_row["xgb_prob"])
-            if pred_available and not (
-                bool(ml_row["ml_agree"]) and
-                ((direction == "BUY" and ml_row["ml_direction"] == "UP") or
-                 (direction == "SELL" and ml_row["ml_direction"] == "DOWN"))
-            ):
-                ml_filtered += 1
-                continue
-
-        # ── LGBM filter — use precomputed batch (O(1) lookup) ────────
-        if lgbm_available and lgbm_batch is not None:
-            lgbm_row = lgbm_batch.iloc[i]
-            lgbm_prob_available = not pd.isna(lgbm_row["lgbm_prob"])
-            if lgbm_prob_available and not bool(lgbm_row["lgbm_pass"]):
-                lgbm_filtered += 1
-                continue
-
-        # ── Deep model filter — use precomputed batch (O(1) lookup) ──
-        if deep_available and deep_batch is not None:
-            deep_row = deep_batch.iloc[i]
-            deep_prob_available = not pd.isna(deep_row["deep_prob"])
-            if deep_prob_available:
-                if direction == "BUY" and not bool(deep_row["deep_pass_buy"]):
-                    deep_filtered += 1
-                    continue
-                if direction == "SELL" and not bool(deep_row["deep_pass_sell"]):
-                    deep_filtered += 1
-                    continue
-
-        # ── HMM regime filter ─────────────────────────────────────────
+        # ── Stage 8: Meta-Decision Layer (replaces separate filters) ──
+        # Get HMM regime state for this bar
         bar_regime_state = 1  # default RANGING
         bar_regime_label = "RANGING"
-        bar_regime_mult = 1.0
         if h1_regime_states is not None:
             h1_regime_idx = h1_processed.index.searchsorted(bar_time, side="right") - 1
             h1_regime_idx = max(0, min(h1_regime_idx, len(h1_regime_states) - 1))
             bar_regime_state = int(h1_regime_states[h1_regime_idx])
             bar_regime_label = regime_labels_map.get(bar_regime_state, f"S{bar_regime_state}")
-            bar_regime_mult = regime_multipliers.get(bar_regime_state, 1.0)
 
-            if bar_regime_mult == 0.0:
+        # Get LGBM probability for this bar
+        bar_lgbm_prob = -1.0  # unavailable sentinel
+        if lgbm_available and lgbm_batch is not None:
+            lgbm_row = lgbm_batch.iloc[i]
+            if not pd.isna(lgbm_row["lgbm_prob"]):
+                bar_lgbm_prob = float(lgbm_row["lgbm_prob"])
+
+        # Run meta-decision cascade
+        meta_result = meta.decide(
+            direction=direction,
+            base_confidence=confidence,
+            lgbm_prob=bar_lgbm_prob,
+            hmm_state=bar_regime_label,
+            session_consecutive_losses=session_consecutive_losses,
+        )
+
+        if not meta_result.allowed:
+            reason = meta_result.block_reason
+            if "HMM CRISIS" in reason:
+                meta_blocked_hmm += 1
                 regime_filtered += 1
-                continue
+            elif "LGBM soft vote" in reason:
+                meta_blocked_lgbm += 1
+            elif "Session loss" in reason:
+                meta_blocked_session += 1
+            elif "confidence" in reason.lower():
+                meta_blocked_confidence += 1
+            continue
+
+        # Track boosted signals (HMM TRENDING + LGBM agrees)
+        if meta_result.adjusted_confidence > confidence:
+            meta_boosted += 1
+        confidence = meta_result.adjusted_confidence
+        meta_position_mults.append(meta_result.position_size_mult)
 
         # ── Circuit breaker gate ──────────────────────────────────────
         cb_state = cb.get_circuit_state(daily_pnl_pct, total_dd_pct)
@@ -1601,9 +1644,9 @@ def run_backtest(
             circuit_multiplier=cb_mult,
         )
 
-        # Apply regime multiplier on top
-        if bar_regime_mult < 1.0:
-            risk_pct *= bar_regime_mult
+        # Apply meta-decision position size multiplier (RANGING = 0.5x)
+        if meta_result.position_size_mult < 1.0:
+            risk_pct *= meta_result.position_size_mult
             risk_pct = max(0.1, risk_pct)
 
         # ── Limit order entry (at S/R levels) ─────────────────────────
@@ -1678,16 +1721,17 @@ def run_backtest(
 
     if cfg.use_limit_orders:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
-              f"| LGBM filtered: {lgbm_filtered} | Deep filtered: {deep_filtered} "
-              f"| Regime filtered: {regime_filtered} "
+              f"| Deep filtered: {deep_filtered} "
               f"| No S/R: {limit_no_sr} | Limits placed: {limit_orders_placed} "
               f"| Filled: {limit_orders_filled} | Expired: {limit_orders_expired} "
               f"| CB blocked: {circuit_breaker_paused} | Trades: {len(trades)}")
     else:
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
-              f"| LGBM filtered: {lgbm_filtered} | Deep filtered: {deep_filtered} "
-              f"| Regime filtered: {regime_filtered} "
+              f"| Deep filtered: {deep_filtered} "
               f"| CB blocked: {circuit_breaker_paused} | Trades taken: {len(trades)}")
+    print(f"[Backtest] Meta-Decision: HMM blocked={meta_blocked_hmm} | "
+          f"LGBM blocked={meta_blocked_lgbm} | Session blocked={meta_blocked_session} | "
+          f"Confidence blocked={meta_blocked_confidence} | Boosted={meta_boosted}")
     print(f"[Backtest] Exits — Friday: {exit_friday_close_count} | "
           f"48-bar: {exit_time_48bar_count} | Trail: {exit_trailing_stop_count}")
     logger.info("Backtest complete: %d trades generated.", len(trades))
@@ -1715,6 +1759,14 @@ def run_backtest(
     if trades:
         risk_pcts = [t.risk_pct_used for t in trades if t.risk_pct_used > 0]
         result.avg_risk_pct = float(np.mean(risk_pcts)) if risk_pcts else 0.0
+
+    # ── Step 4d: Add meta-decision stats to result ────────────────────
+    result.meta_blocked_hmm_crisis = meta_blocked_hmm
+    result.meta_blocked_lgbm_vote = meta_blocked_lgbm
+    result.meta_blocked_session_loss = meta_blocked_session
+    result.meta_blocked_confidence = meta_blocked_confidence
+    result.meta_boosted = meta_boosted
+    result.meta_avg_position_mult = float(np.mean(meta_position_mults)) if meta_position_mults else 0.0
 
     # ── Step 5: Prop firm simulations ──────────────────────────────────
     if cfg.simulate_prop_firm:

@@ -31,7 +31,7 @@ GoldSignalAI/
 │   ├── processor.py           # UTC conversion, dedup, normalization
 │   ├── validator.py           # Strict OHLCV validation
 │   ├── news_fetcher.py        # ForexFactory RSS (high-impact events)
-│   └── macro_fetcher.py       # PLANNED: DXY, VIX, US10Y feeds
+│   └── macro_fetcher.py       # DXY, VIX, US10Y via yfinance → SQLite cache
 │
 ├── analysis/
 │   ├── indicators.py          # 9 voted indicators + PrecomputedIndicators shim (backtest perf)
@@ -40,19 +40,24 @@ GoldSignalAI/
 │   ├── fibonacci.py           # Fibonacci retracement levels
 │   ├── candlestick.py         # Pattern detection
 │   ├── multi_timeframe.py     # M15 + H1 agreement logic
-│   └── regime_filter.py       # PLANNED: HMM regime detection
+│   └── regime_filter.py       # GaussianHMM 3-state regime detection (active)
 │
 ├── signals/
 │   ├── generator.py           # Signal generation with dedup check
 │   ├── formatter.py           # Signal formatting for alerts
-│   └── risk_manager.py        # Position sizing, SL/TP calculation
+│   ├── risk_manager.py        # Position sizing, SL/TP calculation
+│   └── meta_decision.py       # Stage 8: 4-rule cascade (HMM+LGBM+confidence+session)
 │
 ├── ml/
 │   ├── features.py            # 62 features (indicator + statistical + temporal)
 │   ├── model.py               # XGBoost + Random Forest models
-│   ├── trainer.py             # Training with walk-forward CV
+│   ├── trainer.py             # Training with walk-forward CV (+ LGBM train_lgbm)
 │   ├── validator.py           # Model validation
-│   └── predictor.py           # Prediction + batch prediction
+│   ├── predictor.py           # Prediction + batch prediction (+ LGBM predict_lgbm)
+│   ├── deep_features.py       # Stage 7: 15 independent features, 60-bar windows
+│   ├── deep_model.py          # Stage 7: CNN-BiLSTM architecture definition
+│   ├── deep_predictor.py      # Stage 7: CNN-BiLSTM inference + batch prediction
+│   └── deep_trainer.py        # Stage 7: end-to-end training pipeline
 │
 ├── backtest/
 │   ├── engine.py              # Full simulation engine with PrecomputedIndicators
@@ -121,18 +126,45 @@ MIN_SL_PIPS          = 50    # Minimum stop loss
 MAX_SL_PIPS          = 200   # Maximum stop loss
 TOTAL_INDICATORS     = 9     # 9 voted indicators (BBands removed — negative accuracy)
 USE_ML_FILTER        = False # ML disabled (47% accuracy = worse than coin flip)
-ACTIVE_PROFILE       = "FundedNext_1Step"
+USE_LGBM_FILTER      = False # LGBM disabled (52.0% CV, below 53% gate)
+USE_DEEP_FILTER      = False # Deep model disabled (52.1% accuracy, below 54% gate)
+ACTIVE_PROP_FIRM     = "FundedNext_1Step"  # Key name in config.py
 RISK_PER_TRADE_PCT   = 1.0
 ```
 
-### Session Filter (Critical)
+### Meta-Decision Layer (Stage 8)
+```python
+META_LGBM_BLOCK_LOW   = 0.40  # LGBM P(UP) < 0.40 blocks BUY
+META_LGBM_BLOCK_HIGH  = 0.60  # LGBM P(UP) > 0.60 blocks SELL
+META_CONFIDENCE_BOOST = 5.0   # % boost when HMM=TRENDING + LGBM agrees
+META_CONFIDENCE_PEN   = 5.0   # % penalty when HMM=RANGING
+META_MAX_SESSION_LOSS = 2     # consecutive losses before session skip
+```
+
+### CNN-BiLSTM (Stage 7)
+```python
+DEEP_MODEL_PATH    = "models/deep_model.keras"
+DEEP_SCALER_PATH   = "models/deep_scaler.pkl"
+DEEP_LOOKBACK      = 60     # 60-bar sliding window
+DEEP_ACCURACY_GATE = 0.54   # Gate: test accuracy must exceed this (not met: 52.1%)
+DEEP_MIN_CONFIDENCE= 0.60   # P(up) threshold to confirm BUY
+```
+
+### Scoring Gates (in analysis/scoring.py — NOT in config.py)
+```python
+MIN_ACTIVE    = 4  # Minimum active (bull+bear) indicators
+MIN_DOMINANT  = 3  # Minimum in dominant direction (9-indicator system)
+SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # hardcoded in scoring.py
+```
+
+### Session Filter (Critical — hardcoded in analysis/scoring.py)
 ```python
 SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00–21:59 UTC (NY + Overlap)
 # NY session: 13:00-22:00 UTC = 6:00 PM - 1:00 AM PKT
 # London session deliberately excluded (33.9% win rate vs 63.3% NY)
 ```
 
-### Scoring Gates
+### Scoring Gates (hardcoded in analysis/scoring.py — not in config.py)
 ```python
 MIN_ACTIVE    = 4  # Minimum active (bull+bear) indicators
 MIN_DOMINANT  = 3  # Minimum in dominant direction (9-indicator system)
@@ -210,6 +242,8 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | **9-indicator revert** | **conf=65%** | **180** | **36.1%** | **1.09** | **12.27%** | **+$1,030** |
 | Stage 6: Risk mgmt (circuit breaker + Half-Kelly) | conf=65% | 214 | ~40% | 1.62 | 10.50% | — |
 | **Stage 5: +LGBM filter (52% CV, informational)** | **conf=65%** | **78** | **69.2%** | **2.38** | **3.89%** | **+$4,321** |
+| Stage 7: CNN-BiLSTM (52.1% accuracy, filter off) | conf=65% | 214 | ~40% | 1.62 | 10.50% | — |
+| Stage 8: Meta-decision (HMM gate + LGBM soft vote) | conf=65% | — | — | — | — | wired in backtest |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -219,6 +253,13 @@ Sep 2024–Mar 2026 alone is strongly profitable (+$2,884).
 **Stage 5 LGBM note:** CV 52.0% (just below 53% gate) → USE_LGBM_FILTER=False. But backtest
 with filter shows dramatic improvement: PF 1.62→2.38, DD 10.50%→3.89%, WR 38%→69.2%.
 LGBM filtered 292/373 signals (78%). Re-evaluate after 150+ real trades available for training.
+
+**Stage 7 CNN-BiLSTM note:** Test accuracy 52.1% (below 54% gate) → USE_DEEP_FILTER=False.
+Noted UP bias in predictions. Retrain candidate after 150+ real trade outcomes.
+
+**Stage 8 meta-decision note:** Cascade is fully wired into backtest/engine.py. Not yet wired into
+signals/generator.py for live trading (generator uses equivalent but separate per-filter logic).
+Full standalone backtest numbers pending a re-run with meta-decision explicitly enabled.
 
 ---
 
@@ -274,13 +315,14 @@ Diagnostic on 277 signals showed:
 
 **FundedNext 1-Step $10,000**
 - Profit Target: 10% ($1,000)
-- Max Daily Loss: 4% ($400)
-- Max Total Drawdown: 8% ($800)
+- Max Daily Loss: 3% ($300) — warning at 2.5%
+- Max Total Drawdown: 6% ($600) — warning at 5%
 - Challenge Fee: $99
-- Configured in: `ACTIVE_PROFILE = "FundedNext_1Step"`
+- Configured in: `ACTIVE_PROP_FIRM = "FundedNext_1Step"` (key name in config.py)
 
 **Current backtest DD: 3.89%** (with LGBM filter, informational) / 10.50% (Stage 6 baseline)
-- LGBM filter brings DD well under FundedNext 8% limit but CV gate not met (52% < 53%)
+- Stage 6 baseline DD (10.50%) exceeds FundedNext 6% limit — need LGBM/meta filters active
+- LGBM filter brings DD to 3.89% (well within limit) but CV gate not met (52% < 53%)
 - USE_LGBM_FILTER=False until re-trained on 150+ real trade outcomes
 
 ---
@@ -295,27 +337,12 @@ Diagnostic on 277 signals showed:
 - **Stage 2** — REVERTED (Connors RSI/Keltner/Supertrend added noise, PF→0.90, fixed by revert)
 - **Stage 3** — Macro Features Pipeline (DXY/VIX/US10Y via yfinance → ml/features.py)
 - **Stage 4** — HMM Regime Detection (GaussianHMM 3-state on H1, regime-aware sizing)
-- **Stage 5** — LightGBM Classifier (52% CV, gate not met; USE_LGBM_FILTER=False; backtest shows PF 2.38 with filter)
+- **Stage 5** — LightGBM Classifier (52.0% CV, gate not met; USE_LGBM_FILTER=False; backtest shows PF 2.38 with filter)
 - **Stage 6** — Risk Management (circuit breaker + Half-Kelly + exits; PF 1.62, DD 10.50%)
+- **Stage 7** — CNN-BiLSTM Deep Learning (52.1% test accuracy, gate not met; USE_DEEP_FILTER=False; UP bias noted)
+- **Stage 8** — Meta-Decision Layer (HMM hard gate + LGBM soft vote + confidence boost/penalty + session loss circuit; wired into backtest/engine.py)
 
 ### 📋 REMAINING STAGES
-
-#### Stage 7 — CNN-BiLSTM Deep Learning
-```
-Conv1D → BatchNorm → BiLSTM → Attention → Dense
-60-bar lookback window
-Train on Google Colab (free GPU)
-Expected: 55-58% accuracy
-```
-
-#### Stage 8 — Meta-Decision Layer
-```
-Scoring Engine + LightGBM + CNN-BiLSTM + HMM
-→ single decision function
-→ HMM regime gates all signals
-→ LightGBM must agree with scoring direction
-→ CNN boosts/reduces confidence
-```
 
 #### Stage 9 — Multi-Asset Support
 ```
@@ -450,31 +477,44 @@ Sharpe Ratio:   2.0-2.5
 
 ---
 
-## ML Architecture (Planned)
+## ML Architecture
 
-### Current State
-- XGBoost + Random Forest: USE_ML_FILTER=False (47% CV, worse than coin flip)
-- LightGBM (Stage 5): trained, USE_LGBM_FILTER=False (52% CV, below 53% gate)
+### Current State (Stages 3–8 complete)
+- **XGBoost + Random Forest:** USE_ML_FILTER=False (47% CV, worse than coin flip)
+- **LightGBM (Stage 5):** trained, USE_LGBM_FILTER=False (52.0% CV, below 53% gate)
   - 24 independent features: returns, ATR ratio, DXY/VIX/US10Y, session, Hurst
   - Top features: dxy_1d_return, us10y_level, dxy_5d_return, vix_level
   - Backtest WITH filter: PF 2.38, DD 3.89%, WR 69.2% — very promising
+  - Used in meta-decision soft vote regardless of USE_LGBM_FILTER flag
   - Needs 150+ real trades to retrain on trade outcomes (vs price direction)
-- HMM Regime Detector: trained and active (3 states on H1)
+- **HMM Regime Detector (Stage 4):** trained and active, 3-state GaussianHMM on H1
+  - Hard gate: CRISIS blocks all signals; RANGING halves position size
+- **CNN-BiLSTM (Stage 7):** trained, USE_DEEP_FILTER=False (52.1% test accuracy, below 54% gate)
+  - 15 independent features, 60-bar sliding window
+  - UP bias noted — predictions skew bullish; retrain after 150+ real trade outcomes
+- **Meta-Decision Layer (Stage 8):** 4-rule cascade wired into backtest/engine.py
+  - Rule 1: HMM hard gate (CRISIS blocks, RANGING halves)
+  - Rule 2: LGBM soft vote (blocks if strong disagreement with direction)
+  - Rule 3: Confidence boost (+5%) when HMM=TRENDING + LGBM agrees; penalty (-5%) when RANGING
+  - Rule 4: Session consecutive loss circuit (≥2 losses → skip rest of session)
+  - ⚠️ NOT yet wired into signals/generator.py for live trading (see Known Integration Gaps)
 
-### Three-Model Architecture (in progress)
+### Four-Model Architecture (complete)
 ```
-Model A: LightGBM — direction classifier ✅ BUILT (52% CV, gate not met)
+Model A: LightGBM — direction classifier ✅ BUILT (52.0% CV, gate not met)
          Independent features (macro, statistical, temporal)
          Re-evaluate after 150+ real trades
 
 Model B: HMM — regime detector (3 states) ✅ BUILT & ACTIVE
          Features: log returns + realized vol on H1
-         NOT a predictor — a FILTER
+         NOT a predictor — a FILTER (hard gate)
 
-Model C: CNN-BiLSTM — deep direction model (Stage 7)
-         60-bar lookback, Conv1D + BiLSTM + Attention
-         Target accuracy: 55-58%
-         Requires GPU for training (Google Colab)
+Model C: CNN-BiLSTM — deep direction model ✅ BUILT (52.1% accuracy, gate not met)
+         15 features, 60-bar lookback, Conv1D + BiLSTM + Attention
+         UP bias noted; filter disabled; retrain candidate
+
+Model D: Meta-Decision cascade ✅ BUILT (wired into backtest, not yet live generator)
+         Combines HMM + LGBM + confidence adj + session loss circuit
 ```
 
 ---
@@ -492,6 +532,15 @@ Model C: CNN-BiLSTM — deep direction model (Stage 7)
 
 ---
 
+## Known Integration Gaps
+
+| File | What's Missing | When to Fix |
+|------|----------------|-------------|
+| `signals/generator.py` | MetaDecision not wired in for live trading. Generator applies HMM/LGBM/Deep as separate blocks but lacks: `session_consecutive_losses` tracking, `META_LGBM_BLOCK_LOW/HIGH` thresholds, confidence boost/penalty. Live bot behavior diverges from backtest. | Stage 9 or before first live deployment. Requires state tracking across signal cycles (state_manager.py). Multi-file change — needs Opus. |
+| `analysis/scoring.py` | MIN_ACTIVE, MIN_DOMINANT, SESSION_ACTIVE_HOURS are hardcoded constants, not in config.py. CLAUDE.md previously claimed they were in config.py. | Low priority — works fine as-is. Move to config.py if needed for per-asset parameterization in Stage 9. |
+
+---
+
 ## Tools & Resources
 - **Data:** Polygon.io (primary), yfinance (fallback)
 - **Alerts:** Discord webhook (primary), Telegram (backup)
@@ -504,15 +553,13 @@ Model C: CNN-BiLSTM — deep direction model (Stage 7)
 
 ---
 
-## Current Status (2026-03-30)
-**Stages 3–6 complete. LightGBM trained (52% CV, gate not met, filter disabled). Ready for Stage 7.**
+## Current Status (2026-04-01)
+**Stages 3–8 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
 
-Completed today:
-- Stage 5 LightGBM built with 24 independent features (macro + statistical + temporal)
-- CV 52.0% — just below 53% gate. USE_LGBM_FILTER=False.
-- Backtest WITH filter informational: PF 1.62→2.38, DD 10.50%→3.89%, WR 38%→69.2%
-- LGBM filters 78% of signals — dramatic quality improvement but gate not met
-- Bug fixed: macro merge index name bug (df.index.name=None → reset_index column mismatch)
+Completed (Stages 7–8):
+- Stage 7 CNN-BiLSTM: 15-feature, 60-bar sliding window model. Test accuracy 52.1% (below 54% gate). USE_DEEP_FILTER=False. UP bias noted.
+- Stage 8 Meta-decision: 4-rule cascade (HMM hard gate + LGBM soft vote + confidence adj + session loss circuit). Wired into backtest/engine.py with full stats tracking in BacktestResult.
+- Integration audit (2026-04-01): signals/generator.py does NOT use MetaDecision for live trading (known gap, needs Opus to fix — requires session_consecutive_losses state tracking).
+- CLAUDE.md corrected: FundedNext_1Step limits are 3%/6% (not 4%/8%); ACTIVE_PROP_FIRM (not ACTIVE_PROFILE); SESSION_ACTIVE_HOURS is in scoring.py (not config.py).
 
-Next: Stage 7 CNN-BiLSTM, or optionally retrain LGBM after 150+ real trade outcomes
-accumulated from forward testing.
+Next: Stage 9 Multi-Asset expansion, or retrain LGBM/CNN-BiLSTM after 150+ real trade outcomes accumulated from forward testing.
