@@ -300,7 +300,16 @@ class Config:
     DEEP_ACCURACY_GATE    = 0.54        # Gate: test accuracy must exceed this
     DEEP_MIN_CONFIDENCE   = 0.60        # P(up) threshold to confirm BUY / (1-this) for SELL
 
-    # ── News Filter ───────────────────────────────────────────────────────────
+    # ── News Filter (Stage 10) ────────────────────────────────────────────────
+    NEWS_FILTER_ENABLED       = True    # Master switch for NewsFilter
+    NEWS_HIGH_IMPACT_PRE_MIN  = 30      # Block N min BEFORE high-impact event
+    NEWS_HIGH_IMPACT_POST_MIN = 15      # Block N min AFTER high-impact event
+    NEWS_MED_IMPACT_SIZE_MULT = 0.5     # Position size during medium-impact events
+    NEWS_ATR_SPIKE_BLOCK      = 2.0     # ATR ratio above this → block signal
+    NEWS_ATR_SPIKE_REDUCE     = 1.5     # ATR ratio above this → reduce size 50%
+    NEWS_MAX_SPREAD_PIPS      = 5.0     # Spread above this → block signal
+
+    # Legacy news pause (used by main.py check_news_pause)
     NEWS_PAUSE_MINUTES_BEFORE = 30      # Pause N minutes before high-impact news
     NEWS_PAUSE_MINUTES_AFTER  = 30      # Resume N minutes after news
     NEWS_HIGH_IMPACT_KEYWORDS = [

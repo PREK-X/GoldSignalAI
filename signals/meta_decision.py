@@ -1,23 +1,28 @@
 """
 GoldSignalAI -- signals/meta_decision.py
 ==========================================
-Stage 8: Meta-Decision Layer
+Stage 8: Meta-Decision Layer (extended in Stage 10)
 
-Combines the scoring engine, HMM regime detector, and LightGBM classifier
-into a single cascading gate system. Each rule can block or modify a signal.
+Combines the scoring engine, HMM regime detector, LightGBM classifier,
+and news/volatility filter into a single cascading gate system.
 
 Cascade order:
   Rule 1: HMM Hard Gate      — CRISIS blocks all; RANGING halves size
   Rule 2: LGBM Soft Vote     — strong disagreement blocks signal
   Rule 3: Confidence Boost   — HMM+LGBM agreement boosts/penalises confidence
   Rule 4: Session Loss Limit — 2 consecutive losses skip rest of session
+  Rule 5: News/Volatility    — ATR spike or high-impact calendar event blocks
 
 The class is stateless between calls — session_consecutive_losses is managed
 by the caller (backtest engine or signal generator).
+signal_time / current_atr / rolling_atr_mean are optional; if omitted Rule 5
+is skipped (backward-compatible with existing tests and callers).
 """
 
 import logging
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
 
 from config import Config
 
@@ -33,15 +38,26 @@ class MetaResult:
     adjusted_confidence: float     # confidence after boost/penalty
     lgbm_prob: float               # raw LGBM probability (-1.0 if unavailable)
     hmm_state: str                 # TRENDING / RANGING / CRISIS
+    news_blocked: bool = False     # True if Rule 5 triggered
 
 
 class MetaDecision:
     """
-    Stateless meta-decision engine.
+    Stateless meta-decision engine (5-rule cascade as of Stage 10).
 
     Call decide() for every candidate signal. The caller tracks
     session_consecutive_losses externally.
     """
+
+    def __init__(self):
+        # Lazy-init NewsFilter to avoid import at module load time
+        self._news_filter = None
+
+    def _get_news_filter(self):
+        if self._news_filter is None:
+            from signals.news_filter import NewsFilter
+            self._news_filter = NewsFilter()
+        return self._news_filter
 
     def decide(
         self,
@@ -50,9 +66,12 @@ class MetaDecision:
         lgbm_prob: float,
         hmm_state: str,
         session_consecutive_losses: int,
+        signal_time: Optional[datetime] = None,
+        current_atr: float = 0.0,
+        rolling_atr_mean: float = 0.0,
     ) -> MetaResult:
         """
-        Run the 4-rule cascade and return a MetaResult.
+        Run the 5-rule cascade and return a MetaResult.
 
         Args:
             direction:  "BUY" or "SELL" from the scoring engine.
@@ -60,6 +79,9 @@ class MetaDecision:
             lgbm_prob:  LGBM P(UP) for this bar, or -1.0 if unavailable.
             hmm_state:  "TRENDING", "RANGING", or "CRISIS".
             session_consecutive_losses:  Losses so far this NY session.
+            signal_time:  UTC datetime of signal bar (for news calendar check).
+            current_atr:  Current ATR-14 value (for volatility spike check).
+            rolling_atr_mean:  28-bar rolling ATR mean.
 
         Returns:
             MetaResult with allowed/blocked, adjusted confidence, and
@@ -141,6 +163,30 @@ class MetaDecision:
                 lgbm_prob=lgbm_prob,
                 hmm_state=hmm_state,
             )
+
+        # ── Rule 5: News & Volatility Filter ────────────────────────────
+        if signal_time is not None and Config.NEWS_FILTER_ENABLED:
+            try:
+                news_result = self._get_news_filter().check(
+                    signal_time=signal_time,
+                    current_atr=current_atr,
+                    rolling_atr_mean=rolling_atr_mean,
+                )
+                if not news_result.allowed:
+                    return MetaResult(
+                        allowed=False,
+                        block_reason=news_result.block_reason,
+                        position_size_mult=0.0,
+                        adjusted_confidence=adjusted_conf,
+                        lgbm_prob=lgbm_prob,
+                        hmm_state=hmm_state,
+                        news_blocked=True,
+                    )
+                # Apply news size multiplier (take the more conservative value)
+                if news_result.position_size_mult < position_mult:
+                    position_mult = news_result.position_size_mult
+            except Exception as exc:
+                logger.warning("Rule 5 (news filter) failed (continuing): %s", exc)
 
         # ── All rules passed ─────────────────────────────────────────────
         return MetaResult(
