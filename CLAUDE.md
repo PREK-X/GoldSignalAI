@@ -86,8 +86,15 @@ GoldSignalAI/
 │   ├── profiles.py            # FundedNext, FTMO, The5ers etc.
 │   └── compliance_report.py   # Challenge progress reports
 │
+├── execution/
+│   ├── __init__.py
+│   ├── mt5_bridge.py          # Stage 11: MT5 execution (simulation on Linux, real on Windows)
+│   └── position_monitor.py    # Stage 11: trailing stop, time exit, Friday close
+│
 ├── state/
-│   └── state_manager.py       # Runtime state (open_trade, daily_loss etc.)
+│   ├── __init__.py
+│   ├── state_manager.py       # Stage 11: session loss tracking, JSON persistence
+│   └── state.json             # Runtime state (gitignored)
 │
 ├── tests/
 │   ├── test_data_pipeline.py  # 17 tests (all passing)
@@ -150,6 +157,16 @@ NEWS_MED_IMPACT_SIZE_MULT = 0.5   # Halve size during medium-impact ±5min windo
 NEWS_ATR_SPIKE_BLOCK      = 2.0   # ATR > 2.0x 28-bar mean → block signal entirely
 NEWS_ATR_SPIKE_REDUCE     = 1.5   # ATR > 1.5x 28-bar mean → reduce to 50% size
 NEWS_MAX_SPREAD_PIPS      = 5.0   # Spread > 5 pips → block signal (live only)
+```
+
+### MT5 Execution (Stage 11)
+```python
+MT5_SYMBOL            = "XAUUSD"
+MT5_MAGIC_NUMBER      = 20250101     # Identifies bot orders in MT5
+MT5_MAX_SLIPPAGE      = 10           # Max slippage in pips
+MT5_RETRY_ATTEMPTS    = 3            # Retry count on connection errors
+MT5_RETRY_DELAY_S     = 2            # Seconds between retries
+MT5_EXECUTION_ENABLED = False        # True when ready to execute live
 ```
 
 ### CNN-BiLSTM (Stage 7)
@@ -256,6 +273,7 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | Stage 7: CNN-BiLSTM (52.1% accuracy, filter off) | conf=65% | 214 | ~40% | 1.62 | 10.50% | — |
 | Stage 8: Meta-decision (HMM gate + LGBM soft vote) | conf=65% | — | — | — | — | wired in backtest |
 | **Stage 10: News & volatility filter** | **conf=65%** | **107** | **72.9%** | **2.45** | **3.60%** | **+$6,748** |
+| Stage 11: MetaDecision wired to generator + MT5 bridge | N/A | N/A | N/A | N/A | N/A | structural |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -269,8 +287,8 @@ LGBM filtered 292/373 signals (78%). Re-evaluate after 150+ real trades availabl
 **Stage 7 CNN-BiLSTM note:** Test accuracy 52.1% (below 54% gate) → USE_DEEP_FILTER=False.
 Noted UP bias in predictions. Retrain candidate after 150+ real trade outcomes.
 
-**Stage 8 meta-decision note:** Cascade is fully wired into backtest/engine.py. Not yet wired into
-signals/generator.py for live trading (generator uses equivalent but separate per-filter logic).
+**Stage 8+11 meta-decision note:** Cascade is fully wired into both backtest/engine.py and
+signals/generator.py (Stage 11). Live trading behaviour now matches backtest.
 
 **Stage 10 news filter note:** ATR spike check runs in backtest + live. ForexFactory RSS calendar only
 has ~2 weeks forward so calendar gate is always empty for historical bars (correct and expected).
@@ -357,6 +375,7 @@ Diagnostic on 277 signals showed:
 - **Stage 7** — CNN-BiLSTM Deep Learning (52.1% test accuracy, gate not met; USE_DEEP_FILTER=False; UP bias noted)
 - **Stage 8** — Meta-Decision Layer (HMM hard gate + LGBM soft vote + confidence boost/penalty + session loss circuit; wired into backtest/engine.py)
 - **Stage 10** — News & Volatility Filter (PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00, 107 trades)
+- **Stage 11** — MT5 Auto-Execution + MetaDecision wired to generator.py (2026-04-02)
 
 ## Known Issues — Deferred to Stage 15
 ### FundedNext 1-Step DD Breach
@@ -378,11 +397,13 @@ Per-asset ML models and risk parameters
 Portfolio correlation monitoring (max 0.7)
 ```
 
-#### Stage 11 — MT5 Auto-Execution
+#### ~~Stage 11 — MT5 Auto-Execution~~ COMPLETED (2026-04-02)
 ```
-Windows/VPS required (MT5 Python API is Windows-only)
-Automatic order placement with SL/TP
-Position monitoring every 15 minutes
+MT5Bridge: simulation mode (Linux) + real MT5 (Windows/VPS)
+MetaDecision wired into signals/generator.py (was backtest-only)
+StateManager: session loss tracking with JSON persistence
+PositionMonitor: trailing stop at 1R, 48-bar timeout, Friday close
+22 new tests (all passing)
 ```
 
 #### Stage 12 — FundedNext Challenge Mode
@@ -512,13 +533,13 @@ Sharpe Ratio:   2.0-2.5
 - **CNN-BiLSTM (Stage 7):** trained, USE_DEEP_FILTER=False (52.1% test accuracy, below 54% gate)
   - 15 independent features, 60-bar sliding window
   - UP bias noted — predictions skew bullish; retrain after 150+ real trade outcomes
-- **Meta-Decision Layer (Stages 8+10):** 5-rule cascade wired into backtest/engine.py
+- **Meta-Decision Layer (Stages 8+10+11):** 5-rule cascade wired into backtest/engine.py AND signals/generator.py
   - Rule 1: HMM hard gate (CRISIS blocks, RANGING halves)
   - Rule 2: LGBM soft vote (blocks if strong disagreement with direction)
   - Rule 3: Confidence boost (+5%) when HMM=TRENDING + LGBM agrees; penalty (-5%) when RANGING
   - Rule 4: Session consecutive loss circuit (≥2 losses → skip rest of session)
   - Rule 5: News/volatility filter (ATR spike + ForexFactory calendar + spread monitor)
-  - ⚠️ NOT yet wired into signals/generator.py for live trading (see Known Integration Gaps)
+  - Stage 11: Now wired into signals/generator.py for live trading (session loss via state/state_manager.py)
 
 ### Four-Model Architecture (complete)
 ```
@@ -534,7 +555,7 @@ Model C: CNN-BiLSTM — deep direction model ✅ BUILT (52.1% accuracy, gate not
          15 features, 60-bar lookback, Conv1D + BiLSTM + Attention
          UP bias noted; filter disabled; retrain candidate
 
-Model D: Meta-Decision cascade ✅ BUILT (wired into backtest, not yet live generator)
+Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
          Combines HMM + LGBM + confidence adj + session loss circuit + news filter (Stage 10)
 ```
 
@@ -557,7 +578,7 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest, not yet live gene
 
 | File | What's Missing | When to Fix |
 |------|----------------|-------------|
-| `signals/generator.py` | MetaDecision not wired in for live trading. Generator applies HMM/LGBM/Deep as separate blocks but lacks: `session_consecutive_losses` tracking, `META_LGBM_BLOCK_LOW/HIGH` thresholds, confidence boost/penalty. Live bot behavior diverges from backtest. | Stage 9 or before first live deployment. Requires state tracking across signal cycles (state_manager.py). Multi-file change — needs Opus. |
+| `signals/generator.py` | **FIXED (Stage 11)** — MetaDecision wired in. Session loss tracking via state/state_manager.py. All 5 rules (HMM gate, LGBM soft vote, confidence adj, session loss, news/vol) now run in live generator, matching backtest engine. | Done. |
 | `analysis/scoring.py` | MIN_ACTIVE, MIN_DOMINANT, SESSION_ACTIVE_HOURS are hardcoded constants, not in config.py. CLAUDE.md previously claimed they were in config.py. | Low priority — works fine as-is. Move to config.py if needed for per-asset parameterization in Stage 9. |
 
 ---
@@ -566,6 +587,7 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest, not yet live gene
 - **Data:** Polygon.io (primary), yfinance (fallback)
 - **Alerts:** Discord webhook (primary), Telegram (backup)
 - **ML:** XGBoost, LightGBM (trained, disabled), hmmlearn (active), PyTorch (planned)
+- **Execution:** MT5Bridge (simulation on Linux, real MT5 on Windows/VPS)
 - **Dashboard:** Streamlit
 - **Database:** SQLite
 - **Hosting:** Local PC (future: DigitalOcean VPS via Student Pack)
@@ -574,17 +596,22 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest, not yet live gene
 
 ---
 
-## Current Status (2026-04-01)
-**Stages 3–10 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
+## Current Status (2026-04-02)
+**Stages 3–11 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
 
 **Current Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
 
-Completed (Stages 7–10):
+Completed (Stages 7–11):
 - Stage 7 CNN-BiLSTM: 15-feature, 60-bar sliding window model. Test accuracy 52.1% (below 54% gate). USE_DEEP_FILTER=False. UP bias noted.
 - Stage 8 Meta-decision: 4-rule cascade (HMM hard gate + LGBM soft vote + confidence adj + session loss circuit). Wired into backtest/engine.py with full stats tracking in BacktestResult.
 - Stage 10 News & Volatility Filter: ATR spike detection (2.0x = block, 1.5x = reduce to 50%) + ForexFactory economic calendar gate + spread monitor. Wired into meta_decision.py as Rule 5. Backtest: PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00.
-- Integration audit (2026-04-01): signals/generator.py does NOT use MetaDecision for live trading (known gap, needs Opus to fix — requires session_consecutive_losses state tracking).
-- CLAUDE.md corrected: FundedNext_1Step limits are 3%/6% (not 4%/8%); ACTIVE_PROP_FIRM (not ACTIVE_PROFILE); SESSION_ACTIVE_HOURS is in scoring.py (not config.py).
+- Stage 11 MT5 Auto-Execution (2026-04-02):
+  - MetaDecision wired into signals/generator.py — live trading now uses full 5-rule cascade (HMM + LGBM + confidence + session loss + news), matching backtest engine behaviour.
+  - state/state_manager.py: JSON-persisted session loss tracking (increment/reset on trade outcomes, resets per day).
+  - execution/mt5_bridge.py: Platform-aware execution bridge (simulation on Linux, real MT5 on Windows/VPS). place_order, close_order, modify_sl, get_positions.
+  - execution/position_monitor.py: Trailing stop (breakeven at 1R), 48-bar time exit, Friday 20:00 UTC close.
+  - MT5_EXECUTION_ENABLED=False (safe default — set True when ready for live execution).
+  - 22 new tests (all passing). 129/131 total tests pass (same 2 pre-existing failures).
 - Known issue: FundedNext sim fails trailing DD by $19 ($618.77 vs $600 limit) — one extreme day not caught by news filter. Deferred to Stage 15.
 
 Next: Stage 9 Multi-Asset expansion, or retrain LGBM/CNN-BiLSTM after 150+ real trade outcomes accumulated from forward testing.

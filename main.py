@@ -50,6 +50,8 @@ from infrastructure.logger import setup_logging
 from infrastructure.monitoring import init_sentry
 from infrastructure.health import run_health_check
 from database.db import initialize_database, save_signal, save_trade, has_recent_signal
+from execution.mt5_bridge import MT5Bridge
+from execution.position_monitor import PositionMonitor
 
 
 logger = logging.getLogger("GoldSignalAI")
@@ -169,14 +171,16 @@ def _process_signal(
     sig,
     tracker,
     signal_count: int,
+    mt5_bridge: Optional[MT5Bridge] = None,
 ) -> int:
     """
-    Process a generated signal: format, chart, alert, log, track.
+    Process a generated signal: format, chart, alert, log, track, execute.
 
     Args:
         sig:          TradingSignal from generator
         tracker:      ComplianceTracker instance
         signal_count: Running count of signals (for display)
+        mt5_bridge:   MT5Bridge instance (for order execution)
 
     Returns:
         Updated signal_count
@@ -231,6 +235,35 @@ def _process_signal(
             discord_send_signal({"formatted_text": formatted})
         except Exception as exc:
             logger.warning("Discord alert failed: %s", exc)
+
+        # MT5 order execution (Stage 11)
+        if mt5_bridge is not None and Config.MT5_EXECUTION_ENABLED and sig.risk:
+            try:
+                lot_size = sig.risk.suggested_lot
+                # Apply position size multiplier from MetaDecision
+                if hasattr(sig, 'position_size_multiplier') and sig.position_size_multiplier < 1.0:
+                    lot_size = round(max(0.01, lot_size * sig.position_size_multiplier), 2)
+
+                order_result = mt5_bridge.place_order(
+                    symbol=Config.MT5_SYMBOL,
+                    direction=sig.direction,
+                    volume=lot_size,
+                    sl_price=sig.risk.stop_loss,
+                    tp_price=sig.risk.tp1_price,
+                    comment=f"GoldSignalAI {sig.confidence_pct:.0f}%",
+                )
+                if order_result.success:
+                    logger.info(
+                        "MT5 order placed: ticket=%d %s %.2f lots @ %.2f",
+                        order_result.ticket, sig.direction,
+                        lot_size, order_result.fill_price,
+                    )
+                else:
+                    logger.warning("MT5 order failed: %s", order_result.message)
+            except Exception as exc:
+                logger.error("MT5 execution error: %s", exc)
+        elif not Config.MT5_EXECUTION_ENABLED:
+            logger.info("MT5 execution disabled -- manual entry required")
 
         # Record in compliance tracker
         try:
@@ -438,6 +471,19 @@ def _main_loop(shutdown_event: threading.Event) -> None:
     tracker = ComplianceTracker()
     signal_count = 0
 
+    # Stage 11: MT5 execution bridge
+    mt5_bridge = MT5Bridge()
+    mt5_bridge.connect()
+
+    # Position monitor (Discord notifier passed as callable)
+    discord_notify = None
+    try:
+        from alerts.discord_notifier import send_message as discord_send
+        discord_notify = discord_send
+    except Exception:
+        pass
+    pos_monitor = PositionMonitor(mt5_bridge, notifier=discord_notify)
+
     logger.info("Signal loop started. Waiting for next M15 candle close...")
 
     while not shutdown_event.is_set():
@@ -483,6 +529,7 @@ def _main_loop(shutdown_event: threading.Event) -> None:
             pause_reason = f"Compliance: {compliance_reason}"
 
         # ── 5. Generate signal ─────────────────────────────────────────
+        sig = None
         try:
             sig = generate_signal(
                 news_paused=news_paused,
@@ -505,12 +552,26 @@ def _main_loop(shutdown_event: threading.Event) -> None:
                     "is_paused": True,
                 })
             else:
-                signal_count = _process_signal(sig, tracker, signal_count)
+                signal_count = _process_signal(sig, tracker, signal_count, mt5_bridge)
 
         except Exception as exc:
             logger.exception("Signal generation failed: %s", exc)
 
-        # ── 6. Brief pause before next cycle ───────────────────────────
+        # ── 6. Manage open positions (Stage 11) ────────────────────────
+        try:
+            if sig and sig.entry_price > 0:
+                current_atr = 0.0
+                if sig.mtf_result.m15.indicators:
+                    current_atr = sig.mtf_result.m15.indicators.atr.value
+                pos_monitor.check_and_manage_positions(
+                    current_time=now,
+                    current_price=sig.entry_price,
+                    current_atr=current_atr,
+                )
+        except Exception as exc:
+            logger.debug("Position monitor check skipped: %s", exc)
+
+        # ── 7. Brief pause before next cycle ───────────────────────────
         # Wait 10 seconds to avoid any timing edge cases
         shutdown_event.wait(timeout=10)
 

@@ -333,10 +333,16 @@ class Config:
     TELEGRAM_DAILY_SUMMARY_HOUR_EST = 17  # 5 PM EST
     TELEGRAM_WEEKLY_REPORT_WEEKDAY  = 6   # 6 = Sunday
 
-    # ── MT5 Credentials ───────────────────────────────────────────────────────
+    # ── MT5 Credentials & Execution (Stage 11) ──────────────────────────────
     MT5_LOGIN    = int(os.getenv("MT5_LOGIN", "0"))
     MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
-    MT5_SERVER   = os.getenv("MT5_SERVER", "XMGlobal-MT5")
+    MT5_SERVER   = os.getenv("MT5_SERVER", "ICMarketsGlobal-Demo")
+    MT5_SYMBOL          = "XAUUSD"
+    MT5_MAGIC_NUMBER    = 20250101          # Identifies bot orders in MT5
+    MT5_MAX_SLIPPAGE    = 10                # Max slippage in pips
+    MT5_RETRY_ATTEMPTS  = 3                 # Retry count on connection errors
+    MT5_RETRY_DELAY_S   = 2                 # Seconds between retries
+    MT5_EXECUTION_ENABLED = False           # True when ready to execute live
 
     # ── News API ──────────────────────────────────────────────────────────────
     NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")

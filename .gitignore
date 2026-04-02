@@ -19,3 +19,9 @@ data/historical/
 
 # Generated reports
 reports/
+
+# Runtime state (session loss tracking etc.)
+state/state.json
+
+# Keras models
+models/*.keras
