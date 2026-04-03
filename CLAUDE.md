@@ -446,11 +446,18 @@ Discord reports: accuracy before/after, deployed status, backup path
 9 new tests (all passing). 152/154 total tests pass.
 ```
 
-#### Stage 14 — Dashboard Upgrade
+#### ~~Stage 14 — Dashboard Upgrade~~ COMPLETED (2026-04-03)
 ```
-Add pages: Trade History, ML Status, Regime Detection,
-Multi-Asset Overview, Challenge Progress, Risk Monitor
-Add charts: Equity curve, signal heatmap, correlation matrix
+Full dashboard rebuild — dark gold Bloomberg-style theme (#0d1117 bg, #d4a843 gold)
+6 tabs: Trade History (equity curve + filterable table), ML Status (3 model cards),
+        Regime Detection (HMM badge + timeline + pie chart), Challenge Progress (4 gauges),
+        Risk Monitor (circuit breaker + session losses + news events),
+        Signal Heatmap (win rate by hour/weekday + best/worst combos)
+Sidebar: account balance, date range, direction filter, bot status, auto-refresh
+Inter + JetBrains Mono fonts via Google Fonts injection
+Plotly dark theme charts with gold accent throughout
+All tabs handle empty-data gracefully; all DB calls wrapped in try/except
+10 new tests (all passing). 159/161 total tests pass (same 2 pre-existing failures).
 ```
 
 #### Stage 15 — Final Testing
@@ -623,7 +630,7 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
 ---
 
 ## Current Status (2026-04-03)
-**Stages 3–13 complete. All ML models built (gates not met, filters disabled). Auto-retraining pipeline live. Ready for Stage 9.**
+**Stages 3–14 complete. All ML models built (gates not met, filters disabled). Auto-retraining pipeline live. Dashboard fully rebuilt. Ready for Stage 9.**
 
 **Current Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
 
@@ -658,5 +665,17 @@ Completed (Stages 7–13):
   - Discord: send_retrain_report() (accuracy before/after, deployed status) + send_deep_retrain_waiting().
   - State: state/retrain_state.json tracks last_retrain, last_accuracy, retrain_count per model.
   - 9 new tests (all passing). 152/154 total tests pass (same 2 pre-existing failures).
+- Stage 14 Dashboard Rebuild (2026-04-03):
+  - dashboard/app.py fully rewritten (216→~700 lines). Dark gold Bloomberg-style theme.
+  - 6 tabs: Trade History, ML Status, Regime Detection, Challenge Progress, Risk Monitor, Signal Heatmap.
+  - Global CSS injection: #0d1117 bg, #d4a843 gold accent, Inter + JetBrains Mono fonts, Plotly dark charts.
+  - Trade History: equity curve (Plotly), filterable table, 5-metric summary row.
+  - ML Status: model cards for LightGBM/HMM/CNN-BiLSTM with accuracy, gate, last trained, retrain count.
+  - Regime Detection: large state badge (TRENDING/RANGING/CRISIS), timeline scatter, distribution pie.
+  - Challenge Progress: 4 Plotly gauges (PnL/daily loss/total DD/days) with color thresholds.
+  - Risk Monitor: circuit breaker level, session loss counter, today's trades, news events feed.
+  - Signal Heatmap: win rate by hour (NY shading) + weekday, best/worst time combo tables.
+  - Sidebar: account balance input, date range, direction filter, bot status badge, auto-refresh.
+  - tests/test_dashboard.py updated: 10 new tests (all passing). 159/161 total tests pass.
 
 Next: Stage 9 Multi-Asset expansion, or collect 150+ live trade outcomes to unlock CNN-BiLSTM retraining.
