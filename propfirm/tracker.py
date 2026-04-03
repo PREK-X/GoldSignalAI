@@ -322,3 +322,277 @@ class ComplianceTracker:
             f"Win={self.win_rate:.0f}% ({self.state.winning_trades}W/{self.state.losing_trades}L) | "
             f"Daily: {daily.status_icon} | DD: {dd.status_icon}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 12: CHALLENGE TRACKER
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ChallengeTracker:
+    """
+    Real-time FundedNext challenge compliance tracker (Stage 12).
+
+    Tracks:
+      - Daily loss vs 3% hard limit (2.5% auto-pause warning)
+      - Trailing total drawdown vs 6% hard limit (5% auto-pause warning)
+      - Session start balance (resets at midnight UTC each trading day)
+      - Peak balance high-watermark (for trailing DD calculation)
+
+    Usage:
+        tracker = ChallengeTracker("FundedNext_1Step", 10000.0)
+        tracker.load("state/challenge_state.json")   # restore after restart
+        tracker.update_balance(new_balance, datetime.now(timezone.utc))
+        paused, reason = tracker.should_pause_trading()
+        breached, reason = tracker.is_breached()
+        tracker.persist("state/challenge_state.json")
+    """
+
+    def __init__(self, profile_name: str, initial_balance: float):
+        self.profile_name    = profile_name
+        self.profile         = get_profile(profile_name)
+        self.initial_balance = initial_balance
+        self.peak_balance    = initial_balance       # trailing high-watermark
+        self.current_balance = initial_balance
+        self.session_start_balance = initial_balance # resets at midnight UTC
+        self.trading_day: Optional[str] = None       # YYYY-MM-DD of current session
+        self.breach_halted:  bool = False            # True after hard breach
+
+    # ── Balance update ────────────────────────────────────────────────────────
+
+    def update_balance(self, new_balance: float, timestamp: datetime) -> dict:
+        """
+        Update current balance, roll over session if new day, update peak.
+
+        Args:
+            new_balance: Current account balance in USD.
+            timestamp:   UTC datetime of the update.
+
+        Returns:
+            Current status dict from get_status().
+        """
+        today = timestamp.strftime("%Y-%m-%d")
+        if self.trading_day != today:
+            # New session: carry yesterday's closing balance as today's start
+            self.session_start_balance = self.current_balance
+            self.trading_day = today
+
+        self.current_balance = new_balance
+        if new_balance > self.peak_balance:
+            self.peak_balance = new_balance
+
+        return self.get_status()
+
+    # ── Status ────────────────────────────────────────────────────────────────
+
+    def get_status(self) -> dict:
+        """
+        Return full compliance status as a dict.
+
+        All dollar amounts are positive (loss/DD are reported as positive numbers).
+        Percentage values are 0–100 floats (e.g. 2.5 = 2.5%).
+        """
+        p = self.profile
+
+        daily_loss_dollars   = max(0.0, self.session_start_balance - self.current_balance)
+        daily_loss_pct       = daily_loss_dollars / self.initial_balance * 100
+
+        total_dd_dollars     = max(0.0, self.peak_balance - self.current_balance)
+        total_dd_pct         = total_dd_dollars / self.initial_balance * 100
+
+        daily_limit_dollars  = self.initial_balance * p.daily_loss_limit / 100
+        total_dd_limit_dollars = self.initial_balance * p.max_total_drawdown / 100
+
+        daily_remaining_dollars   = max(0.0, daily_limit_dollars - daily_loss_dollars)
+        total_dd_remaining_dollars = max(0.0, total_dd_limit_dollars - total_dd_dollars)
+
+        profit_pct = (self.current_balance - self.initial_balance) / self.initial_balance * 100
+        profit_target_remaining_pct = max(0.0, p.profit_target - profit_pct)
+        profit_progress_pct = (
+            min(100.0, max(0.0, profit_pct / p.profit_target * 100))
+            if p.profit_target > 0 else 0.0
+        )
+        target_met  = profit_pct >= p.profit_target
+        target_amount = self.initial_balance * (1.0 + p.profit_target / 100)
+
+        # Determine compliance status
+        if self.breach_halted or daily_loss_pct >= p.daily_loss_limit or total_dd_pct >= p.max_total_drawdown:
+            compliance_status = "BREACHED"
+        elif daily_loss_pct >= p.daily_loss_warning or total_dd_pct >= p.total_drawdown_warning:
+            compliance_status = "PAUSED"
+        else:
+            compliance_status = "OK"
+
+        pause_reason: Optional[str] = None
+        if compliance_status == "BREACHED":
+            if daily_loss_pct >= p.daily_loss_limit:
+                pause_reason = (
+                    f"Daily loss limit exceeded "
+                    f"({daily_loss_pct:.2f}% vs {p.daily_loss_limit:.1f}%)"
+                )
+            else:
+                pause_reason = (
+                    f"Total drawdown limit exceeded "
+                    f"({total_dd_pct:.2f}% vs {p.max_total_drawdown:.1f}%)"
+                )
+        elif compliance_status == "PAUSED":
+            if daily_loss_pct >= p.daily_loss_warning:
+                pause_reason = (
+                    f"Daily loss approaching limit "
+                    f"({daily_loss_pct:.2f}% of {p.daily_loss_limit:.1f}%)"
+                )
+            else:
+                pause_reason = (
+                    f"Total DD approaching limit "
+                    f"({total_dd_pct:.2f}% of {p.max_total_drawdown:.1f}%)"
+                )
+
+        return {
+            "current_balance":            self.current_balance,
+            "peak_balance":               self.peak_balance,
+            "initial_balance":            self.initial_balance,
+            "profit_pct":                 profit_pct,
+            "daily_loss_pct":             daily_loss_pct,
+            "total_dd_pct":               total_dd_pct,
+            "daily_loss_dollars":         daily_loss_dollars,
+            "total_dd_dollars":           total_dd_dollars,
+            "daily_limit_dollars":        daily_limit_dollars,
+            "total_dd_limit_dollars":     total_dd_limit_dollars,
+            "daily_remaining_dollars":    daily_remaining_dollars,
+            "total_dd_remaining_dollars": total_dd_remaining_dollars,
+            "daily_limit_pct":            p.daily_loss_limit,
+            "total_dd_limit_pct":         p.max_total_drawdown,
+            "daily_warning_pct":          p.daily_loss_warning,
+            "total_dd_warning_pct":       p.total_drawdown_warning,
+            "profit_target_pct":          p.profit_target,
+            "profit_target_remaining_pct": profit_target_remaining_pct,
+            "profit_progress_pct":        profit_progress_pct,
+            "target_amount":              target_amount,
+            "target_met":                 target_met,
+            "compliance_status":          compliance_status,
+            "pause_reason":               pause_reason,
+        }
+
+    # ── Trading gates ─────────────────────────────────────────────────────────
+
+    def should_pause_trading(self) -> tuple[bool, str]:
+        """
+        Returns (True, reason) when daily loss or total DD hits the warning
+        threshold (2.5% / 5.0% for FundedNext 1-Step).
+        Trading is paused but the bot keeps running (shows WAIT signals).
+        """
+        s = self.get_status()
+        p = self.profile
+        if s["daily_loss_pct"] >= p.daily_loss_warning:
+            return True, (
+                f"Daily loss {s['daily_loss_pct']:.2f}% >= "
+                f"{p.daily_loss_warning:.1f}% warning threshold"
+            )
+        if s["total_dd_pct"] >= p.total_drawdown_warning:
+            return True, (
+                f"Total DD {s['total_dd_pct']:.2f}% >= "
+                f"{p.total_drawdown_warning:.1f}% warning threshold"
+            )
+        return False, ""
+
+    def is_breached(self) -> tuple[bool, str]:
+        """
+        Returns (True, reason) when daily loss or total DD hits the hard
+        limit (3% / 6% for FundedNext 1-Step).
+        Trading is halted permanently for the session.
+        """
+        s = self.get_status()
+        p = self.profile
+        if s["daily_loss_pct"] >= p.daily_loss_limit:
+            return True, (
+                f"Daily loss {s['daily_loss_pct']:.2f}% exceeded "
+                f"{p.daily_loss_limit:.1f}% limit"
+            )
+        if s["total_dd_pct"] >= p.max_total_drawdown:
+            return True, (
+                f"Total DD {s['total_dd_pct']:.2f}% exceeded "
+                f"{p.max_total_drawdown:.1f}% limit"
+            )
+        return False, ""
+
+    # ── Discord summary ───────────────────────────────────────────────────────
+
+    def get_daily_summary(self) -> str:
+        """Return formatted string for Discord daily challenge report."""
+        s = self.get_status()
+        p = self.profile
+        sep = "━" * 36
+
+        lines = [
+            "📊 GoldSignalAI — Daily Challenge Report",
+            sep,
+            f"💰 Balance:     ${s['current_balance']:,.2f}  ({s['profit_pct']:+.2f}%)",
+            f"🎯 Target:      ${s['target_amount']:,.2f}  ({s['profit_progress_pct']:.1f}% there)",
+            sep,
+            f"📉 Daily Loss:  -${s['daily_loss_dollars']:.2f}  "
+            f"({s['daily_loss_pct']:.2f}% of ${s['daily_limit_dollars']:.0f} limit)",
+            f"   Remaining:   ${s['daily_remaining_dollars']:.2f} today",
+            f"📉 Total DD:    {s['total_dd_pct']:.2f}% of {p.max_total_drawdown:.2f}% limit",
+            f"   Remaining:   ${s['total_dd_remaining_dollars']:.2f} buffer",
+            sep,
+        ]
+
+        if s["target_met"]:
+            lines.append("🏆 Status: TARGET MET — Challenge complete!")
+        elif s["compliance_status"] == "BREACHED":
+            lines.append("🔴 Status: BREACHED — Trading HALTED")
+        elif s["compliance_status"] == "PAUSED":
+            if s["daily_loss_pct"] >= p.daily_loss_warning:
+                lines.append("⚠️ Status: WARNING — approaching daily limit")
+            else:
+                lines.append("⚠️ Status: WARNING — approaching DD limit")
+        else:
+            lines.append("✅ Status: ON TRACK")
+
+        return "\n".join(lines)
+
+    # ── Persistence ───────────────────────────────────────────────────────────
+
+    def persist(self, filepath: str) -> None:
+        """Save tracker state to JSON file."""
+        os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+        data = {
+            "profile_name":          self.profile_name,
+            "initial_balance":       self.initial_balance,
+            "peak_balance":          self.peak_balance,
+            "current_balance":       self.current_balance,
+            "session_start_balance": self.session_start_balance,
+            "trading_day":           self.trading_day,
+            "breach_halted":         self.breach_halted,
+        }
+        try:
+            with open(filepath, "w") as f:
+                json.dump(data, f, indent=2)
+            logger.debug("ChallengeTracker state saved to %s", filepath)
+        except Exception as exc:
+            logger.error("ChallengeTracker persist failed: %s", exc)
+
+    def load(self, filepath: str) -> None:
+        """Restore tracker state from JSON file."""
+        if not os.path.isfile(filepath):
+            return
+        try:
+            with open(filepath) as f:
+                data = json.load(f)
+            if data.get("profile_name") != self.profile_name:
+                logger.warning(
+                    "ChallengeTracker: saved profile '%s' != current '%s' — ignoring",
+                    data.get("profile_name"), self.profile_name,
+                )
+                return
+            self.initial_balance       = data.get("initial_balance",       self.initial_balance)
+            self.peak_balance          = data.get("peak_balance",          self.initial_balance)
+            self.current_balance       = data.get("current_balance",       self.initial_balance)
+            self.session_start_balance = data.get("session_start_balance", self.initial_balance)
+            self.trading_day           = data.get("trading_day")
+            self.breach_halted         = data.get("breach_halted",         False)
+            logger.info(
+                "ChallengeTracker loaded from %s — balance=$%.2f peak=$%.2f",
+                filepath, self.current_balance, self.peak_balance,
+            )
+        except Exception as exc:
+            logger.error("ChallengeTracker load failed: %s", exc)

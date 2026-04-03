@@ -315,6 +315,33 @@ def task_check_prop_firm_limits() -> None:
         logger.debug("[Scheduler] Prop firm check error (non-critical): %s", exc)
 
 
+def task_daily_challenge_report() -> None:
+    """
+    Daily FundedNext challenge progress report (21:00 UTC — end of NY session).
+
+    Loads the ChallengeTracker state from disk and sends a Discord report
+    showing balance, profit progress, daily loss, total DD, and status.
+    """
+    logger.info("[Scheduler] Sending daily challenge report...")
+    try:
+        from propfirm.tracker import ChallengeTracker
+        from alerts.discord_notifier import send_daily_challenge_report
+
+        tracker = ChallengeTracker(Config.ACTIVE_PROP_FIRM, Config.CHALLENGE_ACCOUNT_SIZE)
+        if os.path.isfile(Config.CHALLENGE_STATE_FILE):
+            tracker.load(Config.CHALLENGE_STATE_FILE)
+
+        status = tracker.get_status()
+        send_daily_challenge_report(status)
+
+        state = _load_state()
+        state["last_challenge_report"] = datetime.now(timezone.utc).isoformat()
+        _save_state(state)
+
+    except Exception as exc:
+        logger.exception("[Scheduler] Daily challenge report crashed: %s", exc)
+
+
 def task_check_model_accuracy() -> None:
     """
     Daily model accuracy check (06:00 UTC).
@@ -435,6 +462,10 @@ class Scheduler:
         # Model accuracy check — 06:00 UTC daily
         self._schedule.every().day.at("06:00").do(task_check_model_accuracy)
         logger.info("[Scheduler] Registered: model accuracy check (06:00 UTC)")
+
+        # Daily challenge report — 21:00 UTC (end of NY session)
+        self._schedule.every().day.at("21:00").do(task_daily_challenge_report)
+        logger.info("[Scheduler] Registered: daily challenge report (21:00 UTC)")
 
     def _run_loop(self) -> None:
         """The main scheduler loop — runs until stop() is called."""

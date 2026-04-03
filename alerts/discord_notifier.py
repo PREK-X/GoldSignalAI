@@ -95,3 +95,106 @@ def send_signal(signal_data: dict) -> bool:
         lines.append(f"Note: {reason}")
 
     return send_message("\n".join(lines))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 12: CHALLENGE COMPLIANCE NOTIFICATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def send_daily_challenge_report(status: dict) -> bool:
+    """
+    Send the daily FundedNext challenge progress report to Discord.
+
+    Args:
+        status: Dict from ChallengeTracker.get_status()
+
+    Returns:
+        True on success, False otherwise.
+    """
+    sep = "━" * 36
+
+    daily_loss_pct   = status.get("daily_loss_pct", 0.0)
+    daily_limit_pct  = status.get("daily_limit_pct", 3.0)
+    daily_warning_pct = status.get("daily_warning_pct", 2.5)
+    total_dd_pct     = status.get("total_dd_pct", 0.0)
+    total_dd_limit_pct = status.get("total_dd_limit_pct", 6.0)
+    total_dd_warning_pct = status.get("total_dd_warning_pct", 5.0)
+    compliance_status = status.get("compliance_status", "OK")
+
+    # Status line
+    if status.get("target_met"):
+        status_line = "🏆 Status: TARGET MET — Challenge complete!"
+    elif compliance_status == "BREACHED":
+        status_line = "🔴 Status: BREACHED — Trading HALTED"
+    elif compliance_status == "PAUSED":
+        if daily_loss_pct >= daily_warning_pct:
+            status_line = "⚠️ Status: WARNING — approaching daily limit"
+        else:
+            status_line = "⚠️ Status: WARNING — approaching DD limit"
+    else:
+        status_line = "✅ Status: ON TRACK"
+
+    msg = "\n".join([
+        "📊 GoldSignalAI — Daily Challenge Report",
+        sep,
+        f"💰 Balance:     ${status.get('current_balance', 0):,.2f}  ({status.get('profit_pct', 0):+.2f}%)",
+        f"🎯 Target:      ${status.get('target_amount', 0):,.2f}  ({status.get('profit_progress_pct', 0):.1f}% there)",
+        sep,
+        f"📉 Daily Loss:  -${status.get('daily_loss_dollars', 0):.2f}  "
+        f"({daily_loss_pct:.2f}% of ${status.get('daily_limit_dollars', 0):.0f} limit)",
+        f"   Remaining:   ${status.get('daily_remaining_dollars', 0):.2f} today",
+        f"📉 Total DD:    {total_dd_pct:.2f}% of {total_dd_limit_pct:.2f}% limit",
+        f"   Remaining:   ${status.get('total_dd_remaining_dollars', 0):.2f} buffer",
+        sep,
+        status_line,
+    ])
+    return send_message(msg)
+
+
+def send_challenge_breach_alert(reason: str, status: dict) -> bool:
+    """
+    Send an immediate breach alert to Discord (fires on hard limit violation).
+
+    Args:
+        reason: Human-readable breach reason.
+        status: Dict from ChallengeTracker.get_status()
+
+    Returns:
+        True on success, False otherwise.
+    """
+    sep = "━" * 26
+    msg = "\n".join([
+        "🚨 CHALLENGE BREACH ALERT",
+        sep,
+        f"Reason:  {reason}",
+        f"Balance: ${status.get('current_balance', 0):,.2f}",
+        f"Action:  Trading HALTED",
+        sep,
+        "Review required before resuming.",
+    ])
+    return send_message(msg)
+
+
+def send_challenge_warning(reason: str, status: dict) -> bool:
+    """
+    Send a warning to Discord when the bot auto-pauses near a limit.
+
+    Args:
+        reason: Human-readable pause reason.
+        status: Dict from ChallengeTracker.get_status()
+
+    Returns:
+        True on success, False otherwise.
+    """
+    sep = "━" * 26
+    msg = "\n".join([
+        "⚠️ GoldSignalAI — Trading Paused",
+        sep,
+        f"Reason:        {reason}",
+        f"Balance:       ${status.get('current_balance', 0):,.2f}",
+        f"Daily Loss:    {status.get('daily_loss_pct', 0):.2f}% of {status.get('daily_limit_pct', 3):.1f}% limit",
+        f"Total DD:      {status.get('total_dd_pct', 0):.2f}% of {status.get('total_dd_limit_pct', 6):.1f}% limit",
+        sep,
+        "Trading will resume automatically tomorrow (midnight UTC).",
+    ])
+    return send_message(msg)

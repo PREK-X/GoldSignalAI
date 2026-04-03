@@ -169,6 +169,12 @@ MT5_RETRY_DELAY_S     = 2            # Seconds between retries
 MT5_EXECUTION_ENABLED = False        # True when ready to execute live
 ```
 
+### Challenge Mode (Stage 12)
+```python
+CHALLENGE_MODE_ENABLED  = True      # set False to disable compliance tracking
+CHALLENGE_STATE_FILE    = "state/challenge_state.json"  # JSON persistence
+```
+
 ### CNN-BiLSTM (Stage 7)
 ```python
 DEEP_MODEL_PATH    = "models/deep_model.keras"
@@ -274,6 +280,7 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | Stage 8: Meta-decision (HMM gate + LGBM soft vote) | conf=65% | — | — | — | — | wired in backtest |
 | **Stage 10: News & volatility filter** | **conf=65%** | **107** | **72.9%** | **2.45** | **3.60%** | **+$6,748** |
 | Stage 11: MetaDecision wired to generator + MT5 bridge | N/A | N/A | N/A | N/A | N/A | structural |
+| Stage 12: FundedNext challenge mode (compliance/protection) | N/A | N/A | N/A | N/A | N/A | no new backtest |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -376,6 +383,7 @@ Diagnostic on 277 signals showed:
 - **Stage 8** — Meta-Decision Layer (HMM hard gate + LGBM soft vote + confidence boost/penalty + session loss circuit; wired into backtest/engine.py)
 - **Stage 10** — News & Volatility Filter (PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00, 107 trades)
 - **Stage 11** — MT5 Auto-Execution + MetaDecision wired to generator.py (2026-04-02)
+- **Stage 12** — FundedNext Challenge Mode: ChallengeTracker, auto-pause, daily Discord reports (2026-04-02)
 
 ## Known Issues — Deferred to Stage 15
 ### FundedNext 1-Step DD Breach
@@ -597,7 +605,7 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
 ---
 
 ## Current Status (2026-04-02)
-**Stages 3–11 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
+**Stages 3–12 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
 
 **Current Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
 
@@ -613,5 +621,14 @@ Completed (Stages 7–11):
   - MT5_EXECUTION_ENABLED=False (safe default — set True when ready for live execution).
   - 22 new tests (all passing). 129/131 total tests pass (same 2 pre-existing failures).
 - Known issue: FundedNext sim fails trailing DD by $19 ($618.77 vs $600 limit) — one extreme day not caught by news filter. Deferred to Stage 15.
+- Stage 12 FundedNext Challenge Mode (2026-04-02):
+  - ChallengeTracker class in propfirm/tracker.py — real-time daily loss + trailing DD tracking.
+  - Auto-pause at 2.5% daily / 5.0% total DD warning thresholds; halt at 3% / 6% hard limits.
+  - Balance derived from SQLite closed trades PnL + initial balance on each loop iteration.
+  - State persisted to state/challenge_state.json (survives restarts).
+  - Discord alerts: breach alert (immediate), warning alert (once per day), daily report at 21:00 UTC.
+  - CHALLENGE_MODE_ENABLED=True, CHALLENGE_STATE_FILE="state/challenge_state.json" in config.py.
+  - FundedNext_1Step min_trading_days set to 0 (no minimum days on 1-Step).
+  - 14 new tests (all passing). 143/145 total tests pass (same 2 pre-existing failures).
 
 Next: Stage 9 Multi-Asset expansion, or retrain LGBM/CNN-BiLSTM after 150+ real trade outcomes accumulated from forward testing.

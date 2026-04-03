@@ -49,7 +49,7 @@ from config import Config
 from infrastructure.logger import setup_logging
 from infrastructure.monitoring import init_sentry
 from infrastructure.health import run_health_check
-from database.db import initialize_database, save_signal, save_trade, has_recent_signal
+from database.db import initialize_database, save_signal, save_trade, has_recent_signal, DB_PATH
 from execution.mt5_bridge import MT5Bridge
 from execution.position_monitor import PositionMonitor
 
@@ -87,6 +87,31 @@ def _log_signal(signal_data: dict) -> None:
         save_signal(signal_data)
     except Exception as exc:
         logger.warning("Failed to save signal to database: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CHALLENGE BALANCE HELPER (Stage 12)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_balance_from_db() -> float:
+    """
+    Derive current account balance from the SQLite trade log.
+
+    Sums pnl_usd of all closed trades and adds the initial challenge balance.
+    Falls back to initial balance on any error.
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) AS total FROM trades WHERE status = 'closed'"
+        ).fetchone()
+        conn.close()
+        return Config.CHALLENGE_ACCOUNT_SIZE + (row["total"] or 0.0)
+    except Exception as exc:
+        logger.warning("_get_balance_from_db failed (using initial balance): %s", exc)
+        return Config.CHALLENGE_ACCOUNT_SIZE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -466,10 +491,21 @@ def _main_loop(shutdown_event: threading.Event) -> None:
     """
     from signals.generator import generate_signal
     from data.news_fetcher import check_news_pause
-    from propfirm.tracker import ComplianceTracker
+    from propfirm.tracker import ComplianceTracker, ChallengeTracker
 
     tracker = ComplianceTracker()
     signal_count = 0
+
+    # Stage 12: Challenge tracker (real-time compliance protection)
+    challenge_tracker: Optional[ChallengeTracker] = None
+    _challenge_warned_day: str = ""   # date of last Discord warning (dedup)
+    if Config.CHALLENGE_MODE_ENABLED:
+        challenge_tracker = ChallengeTracker(
+            Config.ACTIVE_PROP_FIRM, Config.CHALLENGE_ACCOUNT_SIZE
+        )
+        if os.path.isfile(Config.CHALLENGE_STATE_FILE):
+            challenge_tracker.load(Config.CHALLENGE_STATE_FILE)
+        logger.info("Stage 12 challenge tracker loaded (%s).", Config.ACTIVE_PROP_FIRM)
 
     # Stage 11: MT5 execution bridge
     mt5_bridge = MT5Bridge()
@@ -527,6 +563,51 @@ def _main_loop(shutdown_event: threading.Event) -> None:
             # Still generate signal (for display) but mark as paused
             news_paused = True
             pause_reason = f"Compliance: {compliance_reason}"
+
+        # ── 4b. Stage 12: Challenge tracker compliance ─────────────────
+        if challenge_tracker is not None and not news_paused:
+            try:
+                new_balance = _get_balance_from_db()
+                challenge_tracker.update_balance(new_balance, now)
+                challenge_tracker.persist(Config.CHALLENGE_STATE_FILE)
+
+                # Hard breach → halt trading permanently (until manual review)
+                breached, breach_reason = challenge_tracker.is_breached()
+                if breached:
+                    logger.critical("CHALLENGE BREACHED: %s", breach_reason)
+                    if not challenge_tracker.breach_halted:
+                        challenge_tracker.breach_halted = True
+                        challenge_tracker.persist(Config.CHALLENGE_STATE_FILE)
+                        try:
+                            from alerts.discord_notifier import send_challenge_breach_alert
+                            send_challenge_breach_alert(
+                                breach_reason, challenge_tracker.get_status()
+                            )
+                        except Exception as _de:
+                            logger.warning("Breach Discord alert failed: %s", _de)
+                    news_paused = True
+                    pause_reason = f"BREACH: {breach_reason}"
+
+                else:
+                    # Warning threshold → pause trading + send Discord once per day
+                    paused_c, pause_reason_c = challenge_tracker.should_pause_trading()
+                    if paused_c:
+                        logger.warning("Challenge tracker pausing: %s", pause_reason_c)
+                        today_str = now.strftime("%Y-%m-%d")
+                        if _challenge_warned_day != today_str:
+                            try:
+                                from alerts.discord_notifier import send_challenge_warning
+                                send_challenge_warning(
+                                    pause_reason_c, challenge_tracker.get_status()
+                                )
+                                _challenge_warned_day = today_str
+                            except Exception as _de:
+                                logger.warning("Warning Discord alert failed: %s", _de)
+                        news_paused = True
+                        pause_reason = pause_reason_c
+
+            except Exception as exc:
+                logger.warning("Challenge tracker check failed (continuing): %s", exc)
 
         # ── 5. Generate signal ─────────────────────────────────────────
         sig = None
@@ -682,6 +763,15 @@ def main() -> None:
 
         if sched is not None:
             sched.stop()
+
+        # Stage 12: persist challenge state on shutdown
+        try:
+            from propfirm.tracker import ChallengeTracker as _CT
+            _ct_path = Config.CHALLENGE_STATE_FILE
+            if Config.CHALLENGE_MODE_ENABLED and os.path.isfile(_ct_path):
+                logger.info("Challenge state already persisted at %s.", _ct_path)
+        except Exception:
+            pass
 
         if dashboard_proc is not None:
             logger.info("Stopping dashboard (PID %d)...", dashboard_proc.pid)

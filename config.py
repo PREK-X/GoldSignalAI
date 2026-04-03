@@ -62,7 +62,7 @@ PROP_FIRM_PROFILES: dict[str, PropFirmProfile] = {
         max_total_drawdown=6.0,
         total_drawdown_warning=5.0,
         profit_target=10.0,
-        min_trading_days=5,
+        min_trading_days=0,          # No minimum trading days on 1-Step
         description="FundedNext Stellar 1-Step — strict daily loss rule"
     ),
 
@@ -324,8 +324,10 @@ class Config:
     # ↓ CHANGE THIS LINE to switch between firm presets ↓
     ACTIVE_PROP_FIRM = "FundedNext_1Step"
 
-    CHALLENGE_ACCOUNT_SIZE = 10_000     # Account size in USD
-    RISK_PER_TRADE_PCT     = 1.0        # % of account risked per trade
+    CHALLENGE_ACCOUNT_SIZE  = 10_000    # Account size in USD
+    RISK_PER_TRADE_PCT      = 1.0       # % of account risked per trade
+    CHALLENGE_MODE_ENABLED  = True      # Stage 12: real-time compliance tracking
+    CHALLENGE_STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "challenge_state.json")
 
     # ── Telegram ─────────────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")
