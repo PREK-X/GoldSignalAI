@@ -593,3 +593,8 @@ def is_lgbm_ready() -> bool:
 def invalidate_lgbm_cache() -> bool:
     """Force-reload LGBM model from disk."""
     return _LGBMCache.reload()
+
+
+def reload_lgbm_model() -> bool:
+    """Reload LGBM model from disk without restarting bot. Called after retrain."""
+    return _LGBMCache.reload()

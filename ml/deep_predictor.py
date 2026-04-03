@@ -106,6 +106,11 @@ def is_deep_ready() -> bool:
     return _DeepCache.ensure_loaded()
 
 
+def reload_deep_model() -> bool:
+    """Reload CNN-BiLSTM from disk without restarting bot. Called after retrain."""
+    return _DeepCache.reload()
+
+
 def predict_deep(feat_df: pd.DataFrame, bar_index: int) -> DeepPrediction:
     """
     Predict direction probability for a single bar.

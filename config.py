@@ -361,6 +361,17 @@ class Config:
     PROP_STATE_FILE     = os.path.join(BASE_DIR, "logs", "prop_firm_state.json")
     ML_TRAINING_LOG     = os.path.join(BASE_DIR, "logs", "ml_training.log")
 
+    # ── ML Auto-Retraining (Stage 13) ────────────────────────────────────────
+    RETRAIN_LGBM_ENABLED        = True
+    RETRAIN_LGBM_INTERVAL_DAYS  = 7        # retrain every 7 days
+    RETRAIN_LGBM_MIN_ACCURACY   = 0.50     # deploy only if CV >= 50%
+    RETRAIN_LGBM_ACCURACY_GATE  = 0.53     # gate (informational — not blocking)
+    RETRAIN_DEEP_ENABLED        = True
+    RETRAIN_DEEP_MIN_TRADES     = 150      # min real trade outcomes to retrain CNN-BiLSTM
+    RETRAIN_DEEP_MIN_ACCURACY   = 0.52     # deploy only if val accuracy >= 52%
+    RETRAIN_STATE_FILE          = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "retrain_state.json")
+    RETRAIN_BACKUP_DIR          = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "backups")
+
     # ── Dashboard ─────────────────────────────────────────────────────────────
     DASHBOARD_PORT          = 8501
     DASHBOARD_REFRESH_SEC   = 60        # Auto-refresh interval

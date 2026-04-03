@@ -175,6 +175,19 @@ CHALLENGE_MODE_ENABLED  = True      # set False to disable compliance tracking
 CHALLENGE_STATE_FILE    = "state/challenge_state.json"  # JSON persistence
 ```
 
+### ML Auto-Retraining (Stage 13)
+```python
+RETRAIN_LGBM_ENABLED        = True
+RETRAIN_LGBM_INTERVAL_DAYS  = 7        # retrain every 7 days
+RETRAIN_LGBM_MIN_ACCURACY   = 0.50     # deploy only if CV >= 50%
+RETRAIN_LGBM_ACCURACY_GATE  = 0.53     # gate (informational — not blocking)
+RETRAIN_DEEP_ENABLED        = True
+RETRAIN_DEEP_MIN_TRADES     = 150      # min real trade outcomes to retrain CNN-BiLSTM
+RETRAIN_DEEP_MIN_ACCURACY   = 0.52     # deploy only if val accuracy >= 52%
+RETRAIN_STATE_FILE          = "state/retrain_state.json"
+RETRAIN_BACKUP_DIR          = "models/backups/"
+```
+
 ### CNN-BiLSTM (Stage 7)
 ```python
 DEEP_MODEL_PATH    = "models/deep_model.keras"
@@ -281,6 +294,7 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | **Stage 10: News & volatility filter** | **conf=65%** | **107** | **72.9%** | **2.45** | **3.60%** | **+$6,748** |
 | Stage 11: MetaDecision wired to generator + MT5 bridge | N/A | N/A | N/A | N/A | N/A | structural |
 | Stage 12 (Challenge mode) | N/A | N/A | N/A | N/A | N/A | Protection stage |
+| Stage 13 (ML auto-retraining) | N/A | N/A | N/A | N/A | N/A | Infrastructure stage |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -384,6 +398,7 @@ Diagnostic on 277 signals showed:
 - **Stage 10** — News & Volatility Filter (PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00, 107 trades)
 - **Stage 11** — MT5 Auto-Execution + MetaDecision wired to generator.py (2026-04-02)
 - **✅ Stage 12** — FundedNext challenge mode (compliance tracking, auto-pause at 2.5%/5%, daily Discord reports)
+- **✅ Stage 13** — ML Auto-Retraining Pipeline (weekly LGBM retrain, CNN-BiLSTM trigger at 150+ trades, Discord reports, 2026-04-03)
 
 ## Known Issues — Deferred to Stage 15
 ### FundedNext 1-Step DD Breach
@@ -421,11 +436,14 @@ Auto-pause when approaching limits
 Daily Discord progress notifications
 ```
 
-#### Stage 13 — ML Auto-Retraining Pipeline
+#### ~~Stage 13 — ML Auto-Retraining Pipeline~~ COMPLETED (2026-04-03)
 ```
-Weekly retrain on latest 2yr data
-Walk-forward validation before deploying new model
-Discord notification with accuracy results
+Weekly LGBM retrain (Sunday 02:00 UTC) via ml/retrainer.py
+Walk-forward CV gate: deploy only if CV >= 50% and >= old - 1%
+CNN-BiLSTM retrain triggered automatically after 150+ live trade outcomes
+Model backup before every retrain; auto-restore on gate failure
+Discord reports: accuracy before/after, deployed status, backup path
+9 new tests (all passing). 152/154 total tests pass.
 ```
 
 #### Stage 14 — Dashboard Upgrade
@@ -604,12 +622,12 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
 
 ---
 
-## Current Status (2026-04-02)
-**Stages 3–12 complete. All ML models built (gates not met, filters disabled). Ready for Stage 9.**
+## Current Status (2026-04-03)
+**Stages 3–13 complete. All ML models built (gates not met, filters disabled). Auto-retraining pipeline live. Ready for Stage 9.**
 
 **Current Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
 
-Completed (Stages 7–11):
+Completed (Stages 7–13):
 - Stage 7 CNN-BiLSTM: 15-feature, 60-bar sliding window model. Test accuracy 52.1% (below 54% gate). USE_DEEP_FILTER=False. UP bias noted.
 - Stage 8 Meta-decision: 4-rule cascade (HMM hard gate + LGBM soft vote + confidence adj + session loss circuit). Wired into backtest/engine.py with full stats tracking in BacktestResult.
 - Stage 10 News & Volatility Filter: ATR spike detection (2.0x = block, 1.5x = reduce to 50%) + ForexFactory economic calendar gate + spread monitor. Wired into meta_decision.py as Rule 5. Backtest: PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00.
@@ -630,5 +648,15 @@ Completed (Stages 7–11):
   - CHALLENGE_MODE_ENABLED=True, CHALLENGE_STATE_FILE="state/challenge_state.json" in config.py.
   - FundedNext_1Step min_trading_days set to 0 (no minimum days on 1-Step).
   - 14 new tests (all passing). 143/145 total tests pass (same 2 pre-existing failures).
+- Stage 13 ML Auto-Retraining Pipeline (2026-04-03):
+  - ml/retrainer.py: ModelRetrainer class — retrain_lgbm() and retrain_deep_if_ready().
+  - Weekly LGBM retrain fires Sunday 02:00 UTC via scheduler/tasks.py.
+  - Deploy gate: new CV >= RETRAIN_LGBM_MIN_ACCURACY (50%) AND >= old_accuracy - 1% (no regression).
+  - Model files backed up to models/backups/ before every retrain; auto-restored on gate failure.
+  - CNN-BiLSTM retrain triggers automatically when live trade outcomes >= 150 (currently 0).
+  - reload_lgbm_model() / reload_deep_model() added to predictors for hot-reload without restart.
+  - Discord: send_retrain_report() (accuracy before/after, deployed status) + send_deep_retrain_waiting().
+  - State: state/retrain_state.json tracks last_retrain, last_accuracy, retrain_count per model.
+  - 9 new tests (all passing). 152/154 total tests pass (same 2 pre-existing failures).
 
-Next: Stage 9 Multi-Asset expansion, or retrain LGBM/CNN-BiLSTM after 150+ real trade outcomes accumulated from forward testing.
+Next: Stage 9 Multi-Asset expansion, or collect 150+ live trade outcomes to unlock CNN-BiLSTM retraining.

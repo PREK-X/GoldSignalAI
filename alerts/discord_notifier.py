@@ -175,6 +175,91 @@ def send_challenge_breach_alert(reason: str, status: dict) -> bool:
     return send_message(msg)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 13: ML RETRAIN NOTIFICATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def send_retrain_report(model_name: str, result: dict) -> bool:
+    """
+    Send ML retrain outcome report to Discord.
+
+    Args:
+        model_name: "LightGBM" or "CNN-BiLSTM"
+        result:     Dict from ModelRetrainer.retrain_lgbm() / retrain_deep_if_ready()
+
+    Returns:
+        True on success, False otherwise.
+    """
+    from datetime import datetime, timezone, timedelta
+    from config import Config
+
+    sep = "━" * 36
+    old_acc = result.get("old_accuracy", 0.0)
+    new_acc = result.get("new_accuracy", 0.0)
+    deployed = result.get("deployed", False)
+    reason = result.get("reason", "")
+    timestamp = result.get("timestamp", "")
+
+    # Next retrain date
+    try:
+        next_dt = (datetime.now(timezone.utc) + timedelta(days=Config.RETRAIN_LGBM_INTERVAL_DAYS))
+        next_str = next_dt.strftime("%Y-%m-%d")
+    except Exception:
+        next_str = "N/A"
+
+    if deployed:
+        acc_line = f"📈 New Accuracy:  {new_acc:.1%}"
+        deploy_line = "✅ Deployed:      Yes"
+        backup_file = ""
+        backups = result.get("backup_paths", {})
+        if backups:
+            backup_file = "\n📁 Backup saved:  " + os.path.basename(list(backups.values())[0])
+        footer = f"Next retrain: {next_str}"
+        msg = "\n".join(filter(None, [
+            f"🔄 ML Retrain Report — {model_name}",
+            sep,
+            f"📊 Old Accuracy:  {old_acc:.1%}",
+            acc_line,
+            deploy_line,
+            backup_file,
+            sep,
+            footer,
+        ]))
+    else:
+        acc_line = f"📉 New Accuracy:  {new_acc:.1%}"
+        deploy_line = f"❌ Deployed:      No — {reason}"
+        msg = "\n".join([
+            f"🔄 ML Retrain Report — {model_name}",
+            sep,
+            f"📊 Old Accuracy:  {old_acc:.1%}",
+            acc_line,
+            deploy_line,
+            "📁 Old model retained",
+            sep,
+        ])
+
+    return send_message(msg)
+
+
+def send_deep_retrain_waiting(count: int, required: int) -> bool:
+    """
+    Notify Discord that CNN-BiLSTM retrain is pending more live trade outcomes.
+
+    Args:
+        count:    Current number of completed live trades.
+        required: Minimum required (RETRAIN_DEEP_MIN_TRADES).
+
+    Returns:
+        True on success, False otherwise.
+    """
+    msg = "\n".join([
+        "⏳ CNN-BiLSTM Retrain Pending",
+        f"Trade outcomes: {count} / {required} required",
+        "Collect more live trades to trigger retrain.",
+    ])
+    return send_message(msg)
+
+
 def send_challenge_warning(reason: str, status: dict) -> bool:
     """
     Send a warning to Discord when the bot auto-pauses near a limit.

@@ -315,6 +315,70 @@ def task_check_prop_firm_limits() -> None:
         logger.debug("[Scheduler] Prop firm check error (non-critical): %s", exc)
 
 
+def task_weekly_lgbm_retrain() -> None:
+    """
+    Weekly LightGBM retrain task (Sunday 02:00 UTC — outside trading hours).
+
+    Uses ModelRetrainer which:
+      - Backs up current model before any changes
+      - Deploys only if CV >= RETRAIN_LGBM_MIN_ACCURACY and no accuracy regression
+      - Sends Discord report with before/after accuracy
+      - Also checks if CNN-BiLSTM is ready for retrain (>= 150 live outcomes)
+    """
+    logger.info("[Scheduler] Starting weekly LGBM retrain task...")
+    try:
+        from ml.retrainer import ModelRetrainer
+        from alerts.discord_notifier import send_retrain_report, send_deep_retrain_waiting
+        from config import Config
+
+        retrainer = ModelRetrainer()
+
+        # ── LightGBM retrain ───────────────────────────────────────────────
+        if retrainer.should_retrain_lgbm():
+            logger.info("[Scheduler] LGBM retrain interval reached — retraining...")
+            lgbm_result = retrainer.retrain_lgbm()
+            send_retrain_report("LightGBM", lgbm_result)
+
+            if lgbm_result.get("deployed"):
+                logger.info(
+                    "[Scheduler] LGBM retrained and deployed: %.1f%% accuracy",
+                    lgbm_result.get("new_accuracy", 0) * 100,
+                )
+            else:
+                logger.info(
+                    "[Scheduler] LGBM retrain complete — not deployed: %s",
+                    lgbm_result.get("reason", ""),
+                )
+        else:
+            logger.info("[Scheduler] LGBM retrain interval not reached — skipping.")
+
+        # ── CNN-BiLSTM retrain (trigger-based, not interval-based) ────────
+        deep_result = retrainer.retrain_deep_if_ready()
+        if deep_result is not None:
+            send_retrain_report("CNN-BiLSTM", deep_result)
+            logger.info(
+                "[Scheduler] CNN-BiLSTM retrained: deployed=%s accuracy=%.1f%%",
+                deep_result.get("deployed"), deep_result.get("new_accuracy", 0) * 100,
+            )
+        else:
+            # Inform Discord about progress toward 150-trade threshold
+            count = retrainer.get_trade_outcome_count()
+            required = Config.RETRAIN_DEEP_MIN_TRADES
+            logger.info(
+                "[Scheduler] CNN-BiLSTM not ready: %d / %d trade outcomes",
+                count, required,
+            )
+            send_deep_retrain_waiting(count, required)
+
+        # Save last-run time
+        state = _load_state()
+        state["last_lgbm_retrain_check"] = datetime.now(timezone.utc).isoformat()
+        _save_state(state)
+
+    except Exception as exc:
+        logger.exception("[Scheduler] Weekly LGBM retrain task crashed: %s", exc)
+
+
 def task_daily_challenge_report() -> None:
     """
     Daily FundedNext challenge progress report (21:00 UTC — end of NY session).
@@ -443,9 +507,13 @@ class Scheduler:
 
     def _register_jobs(self) -> None:
         """Register all scheduled jobs."""
-        # Weekly retrain — Monday 00:00 UTC
+        # Weekly retrain — Monday 00:00 UTC (XGBoost/RF — Stage 1 models)
         self._schedule.every().monday.at("00:00").do(task_retrain_model)
         logger.info("[Scheduler] Registered: weekly retrain (Monday 00:00 UTC)")
+
+        # Weekly LGBM + deep retrain — Sunday 02:00 UTC (Stage 13)
+        self._schedule.every().sunday.at("02:00").do(task_weekly_lgbm_retrain)
+        logger.info("[Scheduler] Registered: weekly LGBM retrain (Sunday 02:00 UTC)")
 
         # Daily summary — 22:00 UTC (17:00 EST)
         self._schedule.every().day.at("22:00").do(task_daily_summary)
@@ -568,6 +636,12 @@ def trigger_daily_summary() -> None:
     """Manually trigger the daily summary (e.g. for testing Telegram)."""
     logger.info("[Scheduler] Manual daily summary triggered.")
     task_daily_summary()
+
+
+def trigger_lgbm_retrain() -> None:
+    """Manually trigger the LGBM + deep retrain check (e.g. from dashboard)."""
+    logger.info("[Scheduler] Manual LGBM retrain triggered.")
+    task_weekly_lgbm_retrain()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
