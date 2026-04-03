@@ -280,7 +280,7 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | Stage 8: Meta-decision (HMM gate + LGBM soft vote) | conf=65% | — | — | — | — | wired in backtest |
 | **Stage 10: News & volatility filter** | **conf=65%** | **107** | **72.9%** | **2.45** | **3.60%** | **+$6,748** |
 | Stage 11: MetaDecision wired to generator + MT5 bridge | N/A | N/A | N/A | N/A | N/A | structural |
-| Stage 12: FundedNext challenge mode (compliance/protection) | N/A | N/A | N/A | N/A | N/A | no new backtest |
+| Stage 12 (Challenge mode) | N/A | N/A | N/A | N/A | N/A | Protection stage |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -383,7 +383,7 @@ Diagnostic on 277 signals showed:
 - **Stage 8** — Meta-Decision Layer (HMM hard gate + LGBM soft vote + confidence boost/penalty + session loss circuit; wired into backtest/engine.py)
 - **Stage 10** — News & Volatility Filter (PF 2.45, DD 3.60%, WR 72.9%, Sharpe 6.00, 107 trades)
 - **Stage 11** — MT5 Auto-Execution + MetaDecision wired to generator.py (2026-04-02)
-- **Stage 12** — FundedNext Challenge Mode: ChallengeTracker, auto-pause, daily Discord reports (2026-04-02)
+- **✅ Stage 12** — FundedNext challenge mode (compliance tracking, auto-pause at 2.5%/5%, daily Discord reports)
 
 ## Known Issues — Deferred to Stage 15
 ### FundedNext 1-Step DD Breach
