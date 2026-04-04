@@ -328,6 +328,7 @@ class Config:
     RISK_PER_TRADE_PCT      = 1.0       # % of account risked per trade
     CHALLENGE_MODE_ENABLED  = True      # Stage 12: real-time compliance tracking
     CHALLENGE_STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "challenge_state.json")
+    FUNDEDNEXT_DAILY_CEILING_PCT = 2.8  # Pre-emptive block: no new trades if daily loss >= 2.8%
 
     # ── Telegram ─────────────────────────────────────────────────────────────
     TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN", "")

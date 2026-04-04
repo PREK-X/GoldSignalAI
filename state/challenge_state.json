@@ -1,0 +1,9 @@
+{
+  "profile_name": "FundedNext_1Step",
+  "initial_balance": 10000,
+  "peak_balance": 10000,
+  "current_balance": 10000.0,
+  "session_start_balance": 10000,
+  "trading_day": "2026-04-03",
+  "breach_halted": false
+}

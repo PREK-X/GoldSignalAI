@@ -268,6 +268,16 @@ class ComplianceTracker:
         if self.state.challenge_passed:
             return False, "Challenge already passed — no more trading needed"
 
+        # FundedNext 1-Step pre-emptive daily ceiling (2.8% < 3.0% hard limit)
+        if (Config.CHALLENGE_MODE_ENABLED
+                and Config.ACTIVE_PROP_FIRM == "FundedNext_1Step"):
+            daily_loss_pct = abs(min(0.0, self.state.daily_pnl_usd)) / self.state.starting_balance * 100
+            if daily_loss_pct >= Config.FUNDEDNEXT_DAILY_CEILING_PCT:
+                return False, (
+                    f"FundedNext daily ceiling hit ({daily_loss_pct:.2f}% >= "
+                    f"{Config.FUNDEDNEXT_DAILY_CEILING_PCT}%)"
+                )
+
         # Warning: still allowed but reduced risk
         if daily.warning:
             logger.warning("Daily loss approaching limit: %s", daily.message)

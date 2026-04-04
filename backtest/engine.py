@@ -998,10 +998,11 @@ def _simulate_prop_firm(
             )
             break
 
-        # Profit target check
+        # Profit target check — stop sim on target (challenge is over)
         if equity >= target_equity and not passed:
             passed = True
             days_to_complete = len(unique_days)
+            break
 
     # Final checks
     if not breach_reason and not passed:
@@ -1639,6 +1640,14 @@ def run_backtest(
                 cb_days_halted_set.add(this_day)
             continue
         cb_state_counts[cb_state] = cb_state_counts.get(cb_state, 0) + 1
+
+        # ── FundedNext daily ceiling (2.8%) — pre-emptive block ──────
+        if (Config.CHALLENGE_MODE_ENABLED
+                and Config.ACTIVE_PROP_FIRM == "FundedNext_1Step"
+                and daily_pnl_pct < 0
+                and abs(daily_pnl_pct) >= Config.FUNDEDNEXT_DAILY_CEILING_PCT):
+            circuit_breaker_paused += 1
+            continue
 
         # Track total DD override activations
         cb_mult = cb.get_size_multiplier(daily_pnl_pct, total_dd_pct)

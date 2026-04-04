@@ -62,99 +62,123 @@ PLOTLY_LAYOUT = dict(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _CSS = f"""
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  /* ── Base app overrides (highest priority) ── */
+  .stApp {{
+    background-color: {C_BG} !important;
+    font-family: 'Inter', sans-serif !important;
+  }}
+  .stApp > header {{
+    background-color: {C_BG} !important;
+  }}
+  .block-container {{
+    background-color: {C_BG} !important;
+    padding-top: 1rem !important;
+  }}
+  section[data-testid="stSidebar"] {{
+    background-color: {C_BG2} !important;
+    border-right: 1px solid {C_BORDER} !important;
+  }}
+
   /* ── Root & app background ── */
   html, body, [data-testid="stAppViewContainer"] {{
-    background-color: {C_BG};
-    color: {C_TEXT};
-    font-family: 'Inter', sans-serif;
+    background-color: {C_BG} !important;
+    color: {C_TEXT} !important;
+    font-family: 'Inter', sans-serif !important;
   }}
   [data-testid="stSidebar"] {{
-    background-color: {C_BG2};
+    background-color: {C_BG2} !important;
     border-right: 1px solid {C_BORDER};
   }}
   [data-testid="stHeader"] {{
-    background-color: {C_BG};
+    background-color: {C_BG} !important;
     border-bottom: 1px solid {C_BORDER};
   }}
 
   /* ── Tabs ── */
   .stTabs [data-baseweb="tab-list"] {{
-    background-color: {C_BG2};
+    background-color: {C_BG2} !important;
     border-bottom: 1px solid {C_BORDER};
     gap: 0;
   }}
   .stTabs [data-baseweb="tab"] {{
-    background-color: transparent;
-    color: {C_MUTED};
+    background-color: transparent !important;
+    color: {C_MUTED} !important;
     border-radius: 0;
     padding: 8px 16px;
-    font-size: 13px;
+    font-size: 13px !important;
     font-weight: 500;
     border-bottom: 2px solid transparent;
   }}
   .stTabs [aria-selected="true"] {{
     color: {C_GOLD} !important;
     border-bottom: 2px solid {C_GOLD} !important;
+    border-bottom-color: {C_GOLD} !important;
     background-color: transparent !important;
   }}
   .stTabs [data-baseweb="tab-panel"] {{
-    background-color: {C_BG};
+    background-color: {C_BG} !important;
     padding-top: 16px;
   }}
 
   /* ── Metric cards ── */
-  [data-testid="stMetric"] {{
-    background-color: {C_CARD};
+  [data-testid="stMetric"],
+  div[data-testid="metric-container"] {{
+    background-color: {C_CARD} !important;
     border: 1px solid {C_BORDER};
     border-radius: 6px;
     padding: 12px 16px;
   }}
-  [data-testid="stMetricLabel"] {{
+  [data-testid="stMetricLabel"] p,
+  [data-testid="stMetricLabel"],
+  div[data-testid="stMetricLabel"] {{
     color: {C_MUTED} !important;
     font-size: 11px !important;
     text-transform: uppercase;
     letter-spacing: 0.08em;
   }}
-  [data-testid="stMetricValue"] {{
+  [data-testid="stMetricValue"],
+  div[data-testid="stMetricValue"] {{
     color: {C_TEXT} !important;
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 22px !important;
   }}
-  [data-testid="stMetricDelta"] {{
+  [data-testid="stMetricDelta"],
+  div[data-testid="stMetricDelta"] {{
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 12px !important;
   }}
 
   /* ── DataFrames ── */
   [data-testid="stDataFrame"] {{
-    background-color: {C_CARD};
+    background-color: {C_CARD} !important;
     border: 1px solid {C_BORDER};
     border-radius: 6px;
   }}
 
   /* ── Buttons ── */
   .stButton button {{
-    background-color: {C_BG2};
-    color: {C_GOLD};
+    background-color: {C_BG2} !important;
+    color: {C_GOLD} !important;
     border: 1px solid {C_GOLD_DIM};
     border-radius: 4px;
-    font-family: 'Inter', sans-serif;
-    font-size: 13px;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 13px !important;
     font-weight: 500;
   }}
   .stButton button:hover {{
-    background-color: {C_GOLD_DIM};
-    color: {C_BG};
+    background-color: {C_GOLD_DIM} !important;
+    color: {C_BG} !important;
     border-color: {C_GOLD};
   }}
 
   /* ── Sidebar text ── */
   [data-testid="stSidebar"] .stMarkdown p,
   [data-testid="stSidebar"] label {{
-    color: {C_MUTED};
-    font-size: 12px;
+    color: {C_MUTED} !important;
+    font-size: 12px !important;
   }}
 
   /* ── Info / warning / error boxes ── */
@@ -168,28 +192,28 @@ _CSS = f"""
     display: inline-block;
     padding: 4px 10px;
     border-radius: 20px;
-    font-size: 12px;
+    font-size: 12px !important;
     font-weight: 600;
     letter-spacing: 0.05em;
-    font-family: 'JetBrains Mono', monospace;
+    font-family: 'JetBrains Mono', monospace !important;
   }}
-  .badge-green  {{ background: #1e3a1e; color: {C_GREEN}; border: 1px solid {C_GREEN}; }}
-  .badge-yellow {{ background: #2e2810; color: {C_YELLOW}; border: 1px solid {C_YELLOW}; }}
-  .badge-red    {{ background: #3a0f0f; color: {C_RED}; border: 1px solid {C_RED}; }}
-  .badge-gold   {{ background: #2e2010; color: {C_GOLD}; border: 1px solid {C_GOLD}; }}
-  .badge-muted  {{ background: {C_BG2}; color: {C_MUTED}; border: 1px solid {C_BORDER}; }}
+  .badge-green  {{ background: #1e3a1e; color: {C_GREEN} !important; border: 1px solid {C_GREEN}; }}
+  .badge-yellow {{ background: #2e2810; color: {C_YELLOW} !important; border: 1px solid {C_YELLOW}; }}
+  .badge-red    {{ background: #3a0f0f; color: {C_RED} !important; border: 1px solid {C_RED}; }}
+  .badge-gold   {{ background: #2e2010; color: {C_GOLD} !important; border: 1px solid {C_GOLD}; }}
+  .badge-muted  {{ background: {C_BG2} !important; color: {C_MUTED} !important; border: 1px solid {C_BORDER}; }}
 
   /* ── Model card ── */
   .model-card {{
-    background-color: {C_CARD};
+    background-color: {C_CARD} !important;
     border: 1px solid {C_BORDER};
     border-radius: 8px;
     padding: 16px;
     height: 100%;
   }}
   .model-card h4 {{
-    color: {C_GOLD};
-    font-size: 14px;
+    color: {C_GOLD} !important;
+    font-size: 14px !important;
     font-weight: 600;
     margin: 0 0 12px 0;
     text-transform: uppercase;
@@ -200,16 +224,16 @@ _CSS = f"""
     justify-content: space-between;
     padding: 4px 0;
     border-bottom: 1px solid {C_BORDER};
-    font-size: 12px;
+    font-size: 12px !important;
   }}
   .model-stat:last-child {{ border-bottom: none; }}
-  .model-stat .label {{ color: {C_MUTED}; }}
-  .model-stat .value {{ color: {C_TEXT}; font-family: 'JetBrains Mono', monospace; }}
+  .model-stat .label {{ color: {C_MUTED} !important; }}
+  .model-stat .value {{ color: {C_TEXT} !important; font-family: 'JetBrains Mono', monospace !important; }}
 
   /* ── Section header ── */
   .section-header {{
-    color: {C_MUTED};
-    font-size: 10px;
+    color: {C_MUTED} !important;
+    font-size: 10px !important;
     font-weight: 600;
     letter-spacing: 0.12em;
     text-transform: uppercase;
@@ -1147,11 +1171,8 @@ def tab_challenge_progress(account_balance: float) -> None:
                 ),
             ),
         ))
-        fig.update_layout(
-            **PLOTLY_LAYOUT,
-            height=220,
-            margin=dict(l=10, r=10, t=60, b=10),
-        )
+        fig.update_layout(**PLOTLY_LAYOUT)
+        fig.update_layout(height=220, margin=dict(l=10, r=10, t=60, b=10))
         return fig
 
     g1, g2, g3, g4 = st.columns(4)
