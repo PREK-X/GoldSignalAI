@@ -295,11 +295,22 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | Stage 11: MetaDecision wired to generator + MT5 bridge | N/A | N/A | N/A | N/A | N/A | structural |
 | Stage 12 (Challenge mode) | N/A | N/A | N/A | N/A | N/A | Protection stage |
 | Stage 13 (ML auto-retraining) | N/A | N/A | N/A | N/A | N/A | Infrastructure stage |
+| **Stage 15 Phase 1: Full backtest** | **conf=65%** | **153** | **67.3%** | **2.11** | **13.12%** | **+$9,938** |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
 (Apr 2024–Mar 2026) hits a 6-month losing streak at the start (Apr–Oct 2024) which depresses PF.
 Sep 2024–Mar 2026 alone is strongly profitable (+$2,884).
+
+**Stage 15 Phase 1 note (2026-04-03):** Full 2-year backtest on fresh Polygon data (Apr 2024–Mar 2026).
+153 trades, PF 2.11, WR 67.3%, Sharpe 4.42, Sortino 8.84, Max DD 13.12% ($3,004), PnL +$9,938 (+99.4%).
+BUY: 100 signals (68.0% WR) | SELL: 53 signals (66.0% WR). HMM at signal: TRENDING 61.4%, RANGING 38.6%.
+Meta-Decision blocking: LGBM 15.8%, confidence 24.5%, news/vol 1.8%, HMM crisis 1.1%.
+Best month: Jul 2025 +$2,702 | Worst month: Dec 2025 -$1,482. Best streak: 12W | Worst: 7L.
+**3/5 validation gates FAILED:** Max DD 13.12% (target <5%), WR 67.3% (target 70%), Sharpe 4.42 (target 5.0).
+Root cause: Dec 2025 drawdown cluster (7 consecutive losses) creates outsized DD. System is highly profitable
+(+99.4% return) but DD discipline insufficient for FundedNext 6% trailing DD limit.
+FundedNext 1-Step sim: FAILED — daily loss 3.52% breached 3.0% limit on 2025-05-29, max DD 5.44%.
 
 **Stage 5 LGBM note:** CV 52.0% (just below 53% gate) → USE_LGBM_FILTER=False. But backtest
 with filter shows dramatic improvement: PF 1.62→2.38, DD 10.50%→3.89%, WR 38%→69.2%.
@@ -460,10 +471,13 @@ All tabs handle empty-data gracefully; all DB calls wrapped in try/except
 10 new tests (all passing). 159/161 total tests pass (same 2 pre-existing failures).
 ```
 
-#### Stage 15 — Final Testing
+#### Stage 15 — Final Testing (IN PROGRESS)
 ```
-Full 2-year backtest with all stages combined
-Target: PF 1.6-1.9, DD 5-7%, Win Rate 46-50%
+Phase 1: Full backtest (DONE 2026-04-03) — 153 trades, PF 2.11, DD 13.12%, WR 67.3%
+  Gates FAILED: DD 13.12% (target <5%), WR 67.3% (target 70%), Sharpe 4.42 (target 5.0)
+  Gates PASSED: PF 2.11 (target 2.0), Trades 153 (target 80)
+Phase 2: DD reduction tuning (PENDING) — DD regression under investigation
+Phase 3: Re-run backtest to pass all 5 gates (PENDING)
 ```
 
 #### Stage 16 — Deployment
@@ -629,10 +643,11 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
 
 ---
 
-## Current Status (2026-04-03)
-**Stages 3–14 complete. All ML models built (gates not met, filters disabled). Auto-retraining pipeline live. Dashboard fully rebuilt. Ready for Stage 9.**
+## Current Status (2026-04-04)
+**Stages 3–14 complete. Stage 15 Phase 1 backtest run — 3/5 gates failed. DD discipline is the critical blocker.**
 
-**Current Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
+**Stage 15 Phase 1 (Full Backtest):** PF: 2.11 | DD: 13.12% | Win Rate: 67.3% | Sharpe: 4.42 | Sortino: 8.84 | Trades: 153 | PnL: +$9,938
+**Previous Baseline (Stage 10):** PF: 2.45 | DD: 3.60% | Win Rate: 72.9% | Sharpe: 6.00 | Trades: 107
 
 Completed (Stages 7–13):
 - Stage 7 CNN-BiLSTM: 15-feature, 60-bar sliding window model. Test accuracy 52.1% (below 54% gate). USE_DEEP_FILTER=False. UP bias noted.
