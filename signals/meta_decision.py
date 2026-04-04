@@ -7,7 +7,7 @@ Combines the scoring engine, HMM regime detector, LightGBM classifier,
 and news/volatility filter into a single cascading gate system.
 
 Cascade order:
-  Rule 1: HMM Hard Gate      — CRISIS blocks all; RANGING halves size
+  Rule 1: HMM Hard Gate      — CRISIS + RANGING block all signals (Stage 15 Ph2)
   Rule 2: LGBM Soft Vote     — strong disagreement blocks signal
   Rule 3: Confidence Boost   — HMM+LGBM agreement boosts/penalises confidence
   Rule 4: Session Loss Limit — 2 consecutive losses skip rest of session
@@ -103,7 +103,14 @@ class MetaDecision:
             )
 
         if hmm_state == "RANGING":
-            position_mult = 0.5
+            return MetaResult(
+                allowed=False,
+                block_reason="HMM RANGING regime — signals blocked (DD reduction)",
+                position_size_mult=0.0,
+                adjusted_confidence=base_confidence,
+                lgbm_prob=lgbm_prob,
+                hmm_state=hmm_state,
+            )
 
         # ── Rule 2: LGBM Soft Vote ──────────────────────────────────────
         lgbm_available = lgbm_prob >= 0.0
@@ -136,8 +143,7 @@ class MetaDecision:
             if hmm_state == "TRENDING" and lgbm_agrees:
                 adjusted_conf += Config.META_CONFIDENCE_BOOST
 
-        if hmm_state == "RANGING":
-            adjusted_conf -= Config.META_CONFIDENCE_PEN
+        # Note: RANGING penalty removed — RANGING is now fully blocked in Rule 1
 
         # Clamp to 0-100
         adjusted_conf = max(0.0, min(100.0, adjusted_conf))
