@@ -40,8 +40,13 @@ CREATE TABLE IF NOT EXISTS signals (
     bearish_count   INTEGER,
     ml_confirms     INTEGER,
     reason          TEXT,
-    is_paused       INTEGER DEFAULT 0
+    is_paused       INTEGER DEFAULT 0,
+    forward_test    INTEGER DEFAULT 0
 )
+"""
+
+_MIGRATE_SIGNALS_FORWARD_TEST = """
+ALTER TABLE signals ADD COLUMN forward_test INTEGER DEFAULT 0
 """
 
 _CREATE_TRADES = """
@@ -88,6 +93,12 @@ def initialize_database() -> bool:
         conn.execute(_CREATE_SIGNALS)
         conn.execute(_CREATE_TRADES)
         conn.executescript(_CREATE_INDEX)
+        # Migration: add forward_test column if missing (existing DBs)
+        try:
+            conn.execute(_MIGRATE_SIGNALS_FORWARD_TEST)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
         conn.commit()
         conn.close()
         logger.info("Database initialized at %s", DB_PATH)
@@ -102,15 +113,16 @@ def save_signal(signal_data: dict) -> Optional[int]:
     Insert a signal record. Returns the row ID, or None on failure.
 
     Expected keys: timestamp, direction, confidence_pct, entry_price,
-    bullish_count, bearish_count, ml_confirms, reason, is_paused
+    bullish_count, bearish_count, ml_confirms, reason, is_paused, forward_test
     """
     try:
         conn = _get_conn()
         cur = conn.execute(
             """INSERT INTO signals
                (timestamp, symbol, direction, confidence, entry_price,
-                bullish_count, bearish_count, ml_confirms, reason, is_paused)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                bullish_count, bearish_count, ml_confirms, reason, is_paused,
+                forward_test)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
                 signal_data.get("symbol", Config.SYMBOL),
@@ -122,6 +134,7 @@ def save_signal(signal_data: dict) -> Optional[int]:
                 1 if signal_data.get("ml_confirms") else 0,
                 signal_data.get("reason", ""),
                 1 if signal_data.get("is_paused") else 0,
+                1 if signal_data.get("forward_test") else 0,
             ),
         )
         conn.commit()
@@ -131,6 +144,20 @@ def save_signal(signal_data: dict) -> Optional[int]:
     except Exception as exc:
         logger.error("Failed to save signal: %s", exc)
         return None
+
+
+def count_forward_test_trades() -> int:
+    """Return number of actionable signals logged with forward_test=1."""
+    try:
+        conn = _get_conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM signals WHERE forward_test = 1 AND direction != 'WAIT'"
+        ).fetchone()
+        conn.close()
+        return row["cnt"] if row else 0
+    except Exception as exc:
+        logger.warning("count_forward_test_trades failed: %s", exc)
+        return 0
 
 
 def save_trade(trade_data: dict) -> Optional[int]:

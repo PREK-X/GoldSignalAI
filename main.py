@@ -49,12 +49,16 @@ from config import Config
 from infrastructure.logger import setup_logging
 from infrastructure.monitoring import init_sentry
 from infrastructure.health import run_health_check
-from database.db import initialize_database, save_signal, save_trade, has_recent_signal, DB_PATH
+from infrastructure.environment import detect_environment
+from database.db import initialize_database, save_signal, save_trade, has_recent_signal, count_forward_test_trades, DB_PATH
 from execution.mt5_bridge import MT5Bridge
 from execution.position_monitor import PositionMonitor
 
 
 logger = logging.getLogger("GoldSignalAI")
+
+# Module-level environment dict — populated in main() via detect_environment()
+ENV: dict = {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -241,6 +245,7 @@ def _process_signal(
         "ml_confirms": sig.ml_confirms,
         "reason": sig.reason,
         "is_paused": sig.is_paused,
+        "forward_test": Config.FORWARD_TEST_MODE,
     })
 
     # Only send alerts for actionable signals
@@ -525,6 +530,24 @@ def _main_loop(shutdown_event: threading.Event) -> None:
     while not shutdown_event.is_set():
         now = datetime.now(timezone.utc)
 
+        # ── 0. Forward test limit check ────────────────────────────────
+        if Config.FORWARD_TEST_MODE:
+            _ft_done = count_forward_test_trades()
+            if _ft_done >= Config.FORWARD_TEST_MAX_TRADES:
+                logger.info(
+                    "Forward test complete: %d/%d trades logged. Stopping.",
+                    _ft_done, Config.FORWARD_TEST_MAX_TRADES,
+                )
+                try:
+                    from alerts.discord_notifier import send_message as discord_send
+                    discord_send(
+                        f"Forward test complete — {_ft_done}/{Config.FORWARD_TEST_MAX_TRADES} "
+                        "trades logged. Bot stopping for review."
+                    )
+                except Exception as exc:
+                    logger.warning("Discord forward-test-complete alert failed: %s", exc)
+                break
+
         # ── 1. Market hours check ──────────────────────────────────────
         market_open, market_reason = _is_market_open(now)
         if not market_open:
@@ -694,13 +717,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # ── Environment detection ──────────────────────────────────────────
+    global ENV
+    ENV = detect_environment()
+
     # ── Logging ────────────────────────────────────────────────────────
     setup_logging()
 
     # ── Health check mode ──────────────────────────────────────────────
     if args.health_check:
         ok = run_health_check()
-        sys.exit(0 if ok else 1)
+        if not ok:
+            try:
+                from alerts.discord_notifier import send_message as discord_send
+                discord_send("Startup failed — health check did not pass")
+            except Exception:
+                pass
+            sys.exit(1)
+        sys.exit(0)
 
     _print_banner()
 
@@ -742,7 +776,13 @@ def main() -> None:
         # ── Discord startup message ────────────────────────────────────
         try:
             from alerts.discord_notifier import send_message as discord_send
-            discord_send("🟢 GoldSignalAI started successfully")
+            _ft_count = count_forward_test_trades()
+            _mode_str = "VPS" if ENV.get("is_vps") else "Local"
+            _os_str   = "Windows" if ENV.get("is_windows") else ENV.get("os_name", "Linux")
+            _ft_str   = f"Forward test: {_ft_count}/{Config.FORWARD_TEST_MAX_TRADES}"
+            discord_send(
+                f"GoldSignalAI started | Mode: {_mode_str} | OS: {_os_str} | {_ft_str}"
+            )
         except Exception as exc:
             logger.warning("Discord startup message failed: %s", exc)
 

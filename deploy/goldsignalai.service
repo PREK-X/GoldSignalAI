@@ -1,0 +1,21 @@
+[Unit]
+Description=GoldSignalAI — XAU/USD Trading Signal Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/GoldSignalAI
+ExecStart=venv/bin/python main.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=goldsignalai
+
+# Give the bot time to flush state on SIGTERM before killing
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

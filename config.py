@@ -9,6 +9,7 @@ Usage:
 """
 
 import os
+import platform
 from dataclasses import dataclass, field
 from typing import Optional
 from dotenv import load_dotenv
@@ -148,6 +149,15 @@ class Config:
     # ── Identity ─────────────────────────────────────────────────────────────
     APP_NAME = "GoldSignalAI"
     VERSION = "1.0.0"
+
+    # ── Deployment / Environment ──────────────────────────────────────────────
+    VPS_API_KEY  = os.getenv("VPS_API_KEY", "")
+    IS_VPS       = bool(os.getenv("VPS_API_KEY", ""))
+    IS_WINDOWS   = platform.system() == "Windows"
+
+    # ── Forward Test Mode ─────────────────────────────────────────────────────
+    FORWARD_TEST_MODE       = True   # Always True — never ship False
+    FORWARD_TEST_MAX_TRADES = 20     # Stop after N forward-test trades on demo
 
     # ── Asset & Timeframes ────────────────────────────────────────────────────
     SYMBOL = "XAUUSD"                    # MT5 symbol name

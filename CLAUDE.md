@@ -76,7 +76,15 @@ GoldSignalAI/
 │
 ├── infrastructure/
 │   ├── logger.py              # Loguru daily rotation
-│   └── monitoring.py          # Sentry integration (optional)
+│   ├── monitoring.py          # Sentry integration (optional)
+│   └── environment.py         # Stage 16: runtime env detection (VPS/local/Windows/Linux)
+│
+├── deploy/
+│   ├── setup_arch.sh          # Arch Linux local dev setup
+│   ├── setup_vps.sh           # Ubuntu/Debian VPS setup + systemd install
+│   ├── setup_windows.bat      # Windows local setup
+│   ├── goldsignalai.service   # systemd service unit
+│   └── .env.template          # Environment variable template (never contains real keys)
 │
 ├── scheduler/
 │   └── tasks.py               # 15-min signal cycle, weekly retrain
@@ -174,6 +182,15 @@ MT5_EXECUTION_ENABLED = False        # True when ready to execute live
 CHALLENGE_MODE_ENABLED  = True      # set False to disable compliance tracking
 CHALLENGE_STATE_FILE    = "state/challenge_state.json"  # JSON persistence
 FUNDEDNEXT_DAILY_CEILING_PCT = 2.8  # Pre-emptive block at 2.8% (below 3.0% hard limit)
+```
+
+### Deployment / Environment (Stage 16)
+```python
+VPS_API_KEY             = ""        # blank = local, any value = VPS mode
+IS_VPS                  = False     # auto-detected from VPS_API_KEY env var
+IS_WINDOWS              = False     # auto-detected via platform.system()
+FORWARD_TEST_MODE       = True      # Always True — never ship False
+FORWARD_TEST_MAX_TRADES = 20        # Stop loop after N demo trades
 ```
 
 ### ML Auto-Retraining (Stage 13)
@@ -508,13 +525,23 @@ Phase 2.5: FundedNext daily ceiling (DONE 2026-04-05) — 2.8% pre-emptive block
 Phase 3: RESOLVED by Phase 2.5 — daily loss ceiling prevents breach
 ```
 
-#### Stage 16 — Deployment (NEXT)
+#### ~~Stage 16 — Deployment~~ COMPLETED (2026-04-05)
 ```
-VPS hosting (DigitalOcean $6/month — Student Pack)
-24/7 operation, auto-restart
-Forward test: 20 real trades on IC Markets demo
-Small live account: $200-500, 0.1% risk
-FundedNext challenge: only after live profitable
+infrastructure/environment.py: detect_environment() — VPS/local/Windows/Arch auto-detect
+config.py: IS_VPS, IS_WINDOWS, VPS_API_KEY, FORWARD_TEST_MODE=True, FORWARD_TEST_MAX_TRADES=20
+database/db.py: forward_test column on signals table; count_forward_test_trades()
+main.py: detect_environment() called first in main(); forward test loop counter + Discord alert
+         startup Discord: "GoldSignalAI started | Mode | OS | Forward test: N/20"
+         health-check fail: Discord "Startup failed — ..." then exit(1)
+deploy/setup_arch.sh: Arch Linux local dev setup
+deploy/setup_vps.sh: Ubuntu/Debian VPS + systemd service install
+deploy/setup_windows.bat: Windows local setup (venv\Scripts\python)
+deploy/goldsignalai.service: systemd unit (Restart=always, RestartSec=30)
+deploy/.env.template: environment variable template (no real keys)
+Tests: 159/161 (same 2 pre-existing failures unchanged)
+
+Forward test phase: awaiting 20 demo trades on IC Markets (52791555, ICMarketsGlobal-Demo)
+FundedNext challenge: only after 20 demo trades profitable
 ```
 
 ---
@@ -570,6 +597,14 @@ venv/bin/python -m pytest tests/ -v
 - Phase 4 goal: Log 20 real trades in Google Sheet
 
 ---
+
+## Code Navigation
+Always use the code-review-graph MCP tools for exploring structure, 
+finding dependencies, and impact analysis before reading files directly.
+Use get_impact_radius before editing any module.
+
+---
+
 
 ## Expected Performance (Validated Backtest)
 ```
@@ -672,7 +707,7 @@ Model D: Meta-Decision cascade ✅ BUILT (wired into backtest + live generator)
 ---
 
 ## Current Status (2026-04-05)
-**Stages 3–14 complete. Stage 15 Phase 2.5 done — all prop firm sims pass. Ready for Stage 16 (Deployment).**
+**Stages 3–16 complete. Forward testing phase — awaiting 20 demo trades on IC Markets before FundedNext challenge.**
 
 **Stage 15 Phase 2 (RANGING Block):** PF: 2.15 | DD: 4.99% | Win Rate: 72.0% | Sharpe: 5.31 | Trades: 75 | PnL: +$4,818
 **Stage 15 Phase 1 (Before Fix):** PF: 2.11 | DD: 13.12% | Win Rate: 67.3% | Sharpe: 4.42 | Trades: 153 | PnL: +$9,938
@@ -722,4 +757,43 @@ Completed (Stages 7–13):
   - Sidebar: account balance input, date range, direction filter, bot status badge, auto-refresh.
   - tests/test_dashboard.py updated: 10 new tests (all passing). 159/161 total tests pass.
 
-Next: Stage 16 Deployment (VPS, forward test, FundedNext challenge). Stage 9 Multi-Asset expansion after funded.
+Next: Forward test 20 demo trades (IC Markets 52791555), then FundedNext $10k challenge. Stage 9 Multi-Asset expansion after funded.
+
+<!-- code-review-graph MCP tools -->
+## MCP Tools: code-review-graph
+
+**IMPORTANT: This project has a knowledge graph. ALWAYS use the
+code-review-graph MCP tools BEFORE using Grep/Glob/Read to explore
+the codebase.** The graph is faster, cheaper (fewer tokens), and gives
+you structural context (callers, dependents, test coverage) that file
+scanning cannot.
+
+### When to use graph tools FIRST
+
+- **Exploring code**: `semantic_search_nodes` or `query_graph` instead of Grep
+- **Understanding impact**: `get_impact_radius` instead of manually tracing imports
+- **Code review**: `detect_changes` + `get_review_context` instead of reading entire files
+- **Finding relationships**: `query_graph` with callers_of/callees_of/imports_of/tests_for
+- **Architecture questions**: `get_architecture_overview` + `list_communities`
+
+Fall back to Grep/Glob/Read **only** when the graph doesn't cover what you need.
+
+### Key Tools
+
+| Tool | Use when |
+|------|----------|
+| `detect_changes` | Reviewing code changes — gives risk-scored analysis |
+| `get_review_context` | Need source snippets for review — token-efficient |
+| `get_impact_radius` | Understanding blast radius of a change |
+| `get_affected_flows` | Finding which execution paths are impacted |
+| `query_graph` | Tracing callers, callees, imports, tests, dependencies |
+| `semantic_search_nodes` | Finding functions/classes by name or keyword |
+| `get_architecture_overview` | Understanding high-level codebase structure |
+| `refactor_tool` | Planning renames, finding dead code |
+
+### Workflow
+
+1. The graph auto-updates on file changes (via hooks).
+2. Use `detect_changes` for code review.
+3. Use `get_affected_flows` to understand impact.
+4. Use `query_graph` pattern="tests_for" to check coverage.
