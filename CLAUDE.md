@@ -316,6 +316,7 @@ dropped PF from 1.23 → 0.90. Do not re-add without per-indicator backtested va
 | Stage 15 Phase 1: Full backtest | conf=65% | 153 | 67.3% | 2.11 | 13.12% | +$9,938 |
 | Stage 15 Phase 2: RANGING block | conf=65% | 75 | 72.0% | 2.15 | 4.99% | +$4,818 |
 | **Stage 15 Phase 2.5: FN daily ceiling** | **conf=65%** | **75** | **72.0%** | **2.15** | **4.99%** | **+$4,818** |
+| Stage 16 | 75 | 72.0% | 2.15 | 4.99% | 5.31 | No code changes — deployment only |
 
 **Best validated config:** 9 indicators, PF 1.09–1.23, confirmed profitable on 2yr Polygon data.
 Note: PF varies by data window. Original PF 1.23 was on an earlier dataset; current 2yr window
@@ -444,6 +445,9 @@ Diagnostic on 277 signals showed:
 - **Stage 11** — MT5 Auto-Execution + MetaDecision wired to generator.py (2026-04-02)
 - **✅ Stage 12** — FundedNext challenge mode (compliance tracking, auto-pause at 2.5%/5%, daily Discord reports)
 - **✅ Stage 13** — ML Auto-Retraining Pipeline (weekly LGBM retrain, CNN-BiLSTM trigger at 150+ trades, Discord reports, 2026-04-03)
+- **✅ Stage 14** — Dashboard Rebuild (dark gold Bloomberg theme, 6 tabs, 2026-04-03)
+- **✅ Stage 15** — Final Testing (RANGING block, FN daily ceiling, all 8 prop firm sims pass, 2026-04-05)
+- **✅ Stage 16** — Adaptive Deployment (VPS/local/Windows/Linux auto-detect, forward test mode, deploy/ scripts, 2026-04-05)
 
 ## Known Issues
 ### ~~FundedNext 1-Step Daily Loss Breach~~ FIXED (Stage 15 Phase 2.5)
@@ -455,6 +459,12 @@ Diagnostic on 277 signals showed:
 - Every config that increases trades above 80 pushes DD above 5%
 - Fundamental tradeoff: RANGING trades are marginal ($+17.87 avg) but add DD
 - Not a blocker for live trading — 75 high-quality trades is statistically valid
+### MT5 Auto-Execution Not Active
+- MT5_EXECUTION_ENABLED=False — Linux requires Windows/VPS with live MT5 terminal
+- Forward test trades placed manually on IC Markets demo via MT5 mobile app
+### Forward Test Outcome Tracking
+- Trade outcomes tracked manually in Google Sheet, not in SQLite
+- SQLite forward_test column tracks signal count (entry); outcome (win/loss/pips) entered manually
 
 ---
 
