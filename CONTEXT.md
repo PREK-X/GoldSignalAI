@@ -1,0 +1,171 @@
+# CONTEXT.md
+# Read by Claude Code at session start
+# For duplicate facts, canonical source is: CONTEXT.md
+
+---
+
+## Current Status (2026-04-08)
+
+**All 16 stages complete. Forward testing phase.**
+Awaiting 20 demo trades on IC Markets before FundedNext challenge.
+
+---
+
+## Forward Test
+
+| Field           | Value                              |
+|-----------------|------------------------------------|
+| Broker          | IC Markets (Raw Spread, MT5)       |
+| Account         | 52791555                           |
+| Server          | ICMarketsGlobal-Demo               |
+| Execution       | Manual via MT5 mobile app          |
+| Outcome tracking| Google Sheet (not SQLite)          |
+| Target          | 20 demo trades profitable          |
+| Next step       | FundedNext $10k 1-Step ($99 fee)   |
+
+---
+
+## Active Prop Firm: FundedNext 1-Step $10k
+
+| Metric         | Limit   | Backtest actual |
+|----------------|---------|-----------------|
+| Daily loss     | 3.0%    | 2.13% (ceiling) |
+| Total DD       | 6.0%    | 4.99%           |
+| Profit target  | 10.0%   | +48.2%          |
+| Min days       | 0       | N/A             |
+| Daily ceiling  | 2.8%    | Pre-emptive block in config.py |
+
+---
+
+## Latest Backtest (Stage 15 Phase 2.5)
+
+| Metric   | Value  |
+|----------|--------|
+| Trades   | 75     |
+| WR       | 72.0%  |
+| PF       | 2.15   |
+| DD       | 4.99%  |
+| Sharpe   | 5.31   |
+| PnL      | +$4,818|
+| Period   | Apr 2024 - Mar 2026 (2yr Polygon) |
+
+Prop firm sims: FTMO, FN 1-Step, FN 2-Step, The5ers, E8, MFF,
+Apex, Custom — **all 8 pass**.
+
+---
+
+## Backtest History
+
+| Run                        | Trades | WR    | PF   | DD     | PnL     |
+|----------------------------|--------|-------|------|--------|---------|
+| Original (yfinance 60d)    | 46     | 30.4% | 0.89 | 9.17%  | -$332   |
+| SL fix (50-200 pips)       | 30     | 36.7% | 1.04 | 6.34%  | +$85    |
+| Session filter             | 13     | 38.5% | 1.36 | 3.50%  | +$298   |
+| **Polygon 2yr**            | 112    | 38.4% | 1.23 | 10.04% | +$1,773 |
+| MIN_ACTIVE=3 (reverted)    | 180    | 35.6% | 1.08 | 14.94% | +$1,003 |
+| Stage 2 indicators (broke) | 111    | 31.5% | 0.90 | 15.72% | -$696   |
+| 9-indicator revert         | 180    | 36.1% | 1.09 | 12.27% | +$1,030 |
+| Stage 6: Risk mgmt         | 214    | ~40%  | 1.62 | 10.50% | —       |
+| **Stage 5: +LGBM filter**  | 78     | 69.2% | 2.38 | 3.89%  | +$4,321 |
+| Stage 10: News filter       | 107    | 72.9% | 2.45 | 3.60%  | +$6,748 |
+| Stage 15 Ph1: Full          | 153    | 67.3% | 2.11 | 13.12% | +$9,938 |
+| Stage 15 Ph2: RANGING block | 75     | 72.0% | 2.15 | 4.99%  | +$4,818 |
+| **Stage 15 Ph2.5: FN ceil** | 75     | 72.0% | 2.15 | 4.99%  | +$4,818 |
+
+Stage 16 = deployment only, no metric changes.
+
+---
+
+## Critical Config Values
+
+### In config.py
+```
+MIN_CONFIDENCE_PCT           = 65
+MAX_CONFIDENCE_PCT           = 75
+ATR_SL_MULTIPLIER            = 1.5   (SL ~130 pips)
+MIN_SL_PIPS / MAX_SL_PIPS   = 50 / 200
+TOTAL_INDICATORS             = 9
+USE_ML_FILTER                = False  (47% CV)
+USE_LGBM_FILTER              = False  (52% CV < 53% gate)
+USE_DEEP_FILTER              = False  (52.1% < 54% gate)
+RISK_PER_TRADE_PCT           = 1.0
+ACTIVE_PROP_FIRM             = "FundedNext_1Step"
+CHALLENGE_MODE_ENABLED       = True
+FUNDEDNEXT_DAILY_CEILING_PCT = 2.8
+FORWARD_TEST_MODE            = True   (never ship False)
+FORWARD_TEST_MAX_TRADES      = 20
+MT5_EXECUTION_ENABLED        = False  (manual on Linux)
+NEWS_FILTER_ENABLED          = True
+META_LGBM_BLOCK_LOW/HIGH     = 0.40 / 0.60
+META_CONFIDENCE_BOOST        = 5.0
+META_MAX_SESSION_LOSS        = 2
+```
+
+### In analysis/scoring.py (NOT in config.py)
+```
+MIN_ACTIVE           = 4    # min active (bull+bear) indicators
+MIN_DOMINANT         = 3    # min in dominant direction
+SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00-21:59 UTC
+```
+- DO NOT raise MIN_DOMINANT to 4 — filters too aggressively with 9 indicators
+- DO NOT add unvalidated indicators (Stage 2: PF 1.23 -> 0.90)
+
+---
+
+## What Is Disabled and Why
+
+| Feature        | Flag                | Why                              |
+|----------------|---------------------|----------------------------------|
+| XGBoost filter | USE_ML_FILTER=False | 47% CV, worse than coin flip     |
+| LGBM filter    | USE_LGBM_FILTER=False| 52% CV < 53% gate; soft vote ok |
+| CNN-BiLSTM     | USE_DEEP_FILTER=False| 52.1% < 54% gate; UP bias       |
+| MT5 execution  | MT5_EXECUTION_ENABLED=False| Linux has no MT5 terminal |
+| RANGING trades | meta_decision.py R1 | Blocked: $+17.87 avg, high DD   |
+
+Re-enable ML models after 150+ real trade outcomes for retraining.
+
+---
+
+## Known Issues
+
+| Issue                    | Impact              | Status / Workaround           |
+|--------------------------|---------------------|-------------------------------|
+| Trade count 75 < 80 gate | Validation gate fail| DD/volume tradeoff; not a blocker |
+| MT5 not active on Linux  | No auto-execution   | Manual trades via MT5 mobile  |
+| Forward test outcomes    | Not in SQLite       | Google Sheet manual tracking  |
+| 2 test failures          | test_news_fetcher, test_tracker | Pre-existing, not blocking |
+
+---
+
+## Completed Stages
+
+| Stage | Name                   | Date       | Key outcome                    |
+|-------|------------------------|------------|--------------------------------|
+| Ph1-3 | Data+Backtest+Stability| pre-2026   | Polygon 2yr, SQLite, Discord   |
+| 1     | Environment            | pre-2026   | Arch Linux, Python 3.12        |
+| 2     | Indicators (REVERTED)  | pre-2026   | 4 indicators caused PF->0.90   |
+| 3     | Macro Features         | pre-2026   | DXY/VIX/US10Y pipeline         |
+| 4     | HMM Regime             | pre-2026   | 3-state detector, active       |
+| 5     | LightGBM               | pre-2026   | 52% CV, soft vote in meta      |
+| 6     | Risk Management        | pre-2026   | CB + Half-Kelly, PF 1.62       |
+| 7     | CNN-BiLSTM             | pre-2026   | 52.1% acc, disabled            |
+| 8     | Meta-Decision          | pre-2026   | 5-rule cascade                 |
+| 10    | News Filter            | pre-2026   | PF 2.45, WR 72.9%             |
+| 11    | MT5 Execution          | 2026-04-02 | Bridge + monitor + generator   |
+| 12    | Challenge Mode         | 2026-04-02 | Compliance tracking + Discord  |
+| 13    | ML Auto-Retrain        | 2026-04-03 | Weekly LGBM, CNN-BiLSTM @150   |
+| 14    | Dashboard              | 2026-04-03 | Bloomberg theme, 6 tabs        |
+| 15    | Final Testing          | 2026-04-05 | RANGING block + FN ceiling     |
+| 16    | Deployment             | 2026-04-05 | Env detect, forward test mode  |
+
+---
+
+## Remaining: Stage 9 — Multi-Asset
+
+```
+XAGUSD -> EURUSD -> US30 -> NAS100 -> USOIL
+Per-asset ML models and risk parameters
+Portfolio correlation monitoring (max 0.7)
+```
+
+Deferred until after FundedNext challenge funded.
