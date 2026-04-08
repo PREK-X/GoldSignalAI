@@ -203,10 +203,11 @@ def fetch_polygon_data(
         return None
     multiplier, timespan = tf_config
 
-    # Default date range: 2 years ago → today
+    # Default date range: 2 years ago → tomorrow (Polygon end_date is exclusive,
+    # so using today's date would cut off today's live bars)
     now = datetime.now(timezone.utc)
     if end_date is None:
-        end_date = now.strftime("%Y-%m-%d")
+        end_date = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     if start_date is None:
         start_dt = now - timedelta(days=365 * Config.HISTORICAL_YEARS)
         start_date = start_dt.strftime("%Y-%m-%d")
