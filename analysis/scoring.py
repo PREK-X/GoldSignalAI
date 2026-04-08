@@ -269,13 +269,10 @@ def score_signal(
             f"— need at least {MIN_DOMINANT} in same direction"
         )
 
-    # Gate 2: Confidence ceiling — above MAX_CONFIDENCE = over-consensus / lagging.
-    # Diagnostic: 75–80% confidence band had only 38.3% accuracy.
-    if adjusted > MAX_CONFIDENCE:
-        gates.append(
-            f"Confidence {adjusted:.0f}% > {MAX_CONFIDENCE:.0f}% ceiling "
-            f"— over-consensus signals lag the move"
-        )
+    # Gate 2: Confidence ceiling removed — was blocking high-confidence signals
+    # (e.g. 88% adj → WAIT) because MAX_CONFIDENCE=75% gate fired. The diagnostic
+    # showed 75–80% had 38.3% accuracy, but that does not justify blocking 85–99%.
+    # Direction assignment now relies on MIN_CONFIDENCE (65%) as the sole lower bound.
 
     # Gate 3: Opposing indicators too high (unreliable signal).
     if dominant == "BUY" and bearish_count > 2:

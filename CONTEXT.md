@@ -134,6 +134,8 @@ Re-enable ML models after 150+ real trade outcomes for retraining.
 | MT5 not active on Linux  | No auto-execution   | Manual trades via MT5 mobile  |
 | Forward test outcomes    | Not in SQLite       | Google Sheet manual tracking  |
 | 2 test failures          | test_news_fetcher, test_tracker | Pre-existing, not blocking |
+| Stale Polygon data       | Bot operated on yesterday's bars | **FIXED 2026-04-08** — fetcher.py _fetch_polygon passed today as end_date (exclusive); now passes today+1 |
+| Scoring WAIT at 88% conf | Valid BUY/SELL signals blocked | **FIXED 2026-04-08** — MAX_CONFIDENCE=75% ceiling gate removed from scoring.py; MIN_CONFIDENCE=65% is sole lower bound |
 
 ---
 

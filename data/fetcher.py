@@ -441,7 +441,8 @@ def _fetch_polygon(
             symbol=Config.POLYGON_SYMBOL,
             timeframe=timeframe,
             start_date=start_dt.strftime("%Y-%m-%d"),
-            end_date=now_dt.strftime("%Y-%m-%d"),
+            # Polygon end_date is exclusive — use tomorrow so today's live bars are included
+            end_date=(now_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
         )
     except Exception as exc:
         logger.warning("Polygon fetch failed: %s", exc)
