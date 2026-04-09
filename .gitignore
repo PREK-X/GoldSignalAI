@@ -25,3 +25,7 @@ state/state.json
 
 # Keras models
 models/*.keras
+
+# Obsidian vault config and notes
+.obsidian/
+GoldSignalAI/
