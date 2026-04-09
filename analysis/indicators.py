@@ -124,7 +124,7 @@ class AllIndicators:
     def summary_line(self) -> str:
         b = self.bullish_count()
         br = self.bearish_count()
-        return f"{b}/10 Bullish, {br}/10 Bearish"
+        return f"{b}/{len(self.as_list())} Bullish, {br}/{len(self.as_list())} Bearish"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -976,10 +976,12 @@ def calculate_all(df: pd.DataFrame) -> AllIndicators:
     bb_r    = calc_bbands(df)
     atr_r   = calc_atr(df)
 
-    # Determine provisional direction from first 9 for volume confirmation
-    first_nine = [ema_r, adx_r, ich_r, rsi_r, macd_r, stoch_r, cci_r, bb_r, atr_r]
-    bull_count = sum(1 for r in first_nine if r.signal == BULLISH)
-    bear_count = sum(1 for r in first_nine if r.signal == BEARISH)
+    # Determine provisional direction from the 8 voted indicators (excl. BBands
+    # which has 42.3% accuracy, and Volume which needs this direction).
+    # ATR is always NEUTRAL so it's harmless but included for completeness.
+    first_eight = [ema_r, adx_r, ich_r, rsi_r, macd_r, stoch_r, cci_r, atr_r]
+    bull_count = sum(1 for r in first_eight if r.signal == BULLISH)
+    bear_count = sum(1 for r in first_eight if r.signal == BEARISH)
     if   bull_count > bear_count: provisional = BULLISH
     elif bear_count > bull_count: provisional = BEARISH
     else:                          provisional = None

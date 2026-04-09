@@ -508,19 +508,19 @@ class Scheduler:
     def _register_jobs(self) -> None:
         """Register all scheduled jobs."""
         # Weekly retrain — Monday 00:00 UTC (XGBoost/RF — Stage 1 models)
-        self._schedule.every().monday.at("00:00").do(task_retrain_model)
+        self._schedule.every().monday.at("00:00", "UTC").do(task_retrain_model)
         logger.info("[Scheduler] Registered: weekly retrain (Monday 00:00 UTC)")
 
         # Weekly LGBM + deep retrain — Sunday 02:00 UTC (Stage 13)
-        self._schedule.every().sunday.at("02:00").do(task_weekly_lgbm_retrain)
+        self._schedule.every().sunday.at("02:00", "UTC").do(task_weekly_lgbm_retrain)
         logger.info("[Scheduler] Registered: weekly LGBM retrain (Sunday 02:00 UTC)")
 
         # Daily summary — 22:00 UTC (17:00 EST)
-        self._schedule.every().day.at("22:00").do(task_daily_summary)
+        self._schedule.every().day.at("22:00", "UTC").do(task_daily_summary)
         logger.info("[Scheduler] Registered: daily summary (22:00 UTC)")
 
         # Weekly report — Sunday 20:00 UTC
-        self._schedule.every().sunday.at("20:00").do(task_weekly_report)
+        self._schedule.every().sunday.at("20:00", "UTC").do(task_weekly_report)
         logger.info("[Scheduler] Registered: weekly report (Sunday 20:00 UTC)")
 
         # Prop firm limit check — every 5 minutes
@@ -528,11 +528,11 @@ class Scheduler:
         logger.info("[Scheduler] Registered: prop firm limit check (every 5 min)")
 
         # Model accuracy check — 06:00 UTC daily
-        self._schedule.every().day.at("06:00").do(task_check_model_accuracy)
+        self._schedule.every().day.at("06:00", "UTC").do(task_check_model_accuracy)
         logger.info("[Scheduler] Registered: model accuracy check (06:00 UTC)")
 
         # Daily challenge report — 21:00 UTC (end of NY session)
-        self._schedule.every().day.at("21:00").do(task_daily_challenge_report)
+        self._schedule.every().day.at("21:00", "UTC").do(task_daily_challenge_report)
         logger.info("[Scheduler] Registered: daily challenge report (21:00 UTC)")
 
     def _run_loop(self) -> None:

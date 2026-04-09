@@ -560,7 +560,7 @@ def fetch_historical(
                 symbol=Config.POLYGON_SYMBOL,
                 timeframe=timeframe,
                 start_date=start_dt.strftime("%Y-%m-%d"),
-                end_date=now.strftime("%Y-%m-%d"),
+                end_date=(now + timedelta(days=1)).strftime("%Y-%m-%d"),
             )
             if df is not None and len(df) > 100:
                 df = _normalise_columns(df)

@@ -93,7 +93,7 @@ def format_signal(sig: TradingSignal) -> str:
         h1_score  = sig.mtf_result.h1.score
         m15_raw = m15_score.raw_confidence if m15_score else 0.0
         h1_raw  = h1_score.raw_confidence  if h1_score  else 0.0
-        conf_line = f"0% (M15:{m15_raw:.0f}% H1:{h1_raw:.0f}% — need 70%)"
+        conf_line = f"0% (M15:{m15_raw:.0f}% H1:{h1_raw:.0f}% — need {Config.MIN_CONFIDENCE_PCT}%)"
     else:
         conf_line = f"{sig.confidence_pct:.0f}%"
 

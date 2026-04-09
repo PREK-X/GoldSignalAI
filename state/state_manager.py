@@ -13,7 +13,7 @@ run_backtest). This module is for the *live* generator + main loop only.
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from config import Config
@@ -44,7 +44,13 @@ class StateManager:
 
     # ── Session loss tracking ─────────────────────────────────────────────
 
-    def get_session_losses(self) -> int:
+    def get_session_losses(self, as_of: Optional[datetime] = None) -> int:
+        """Return consecutive loss count, resetting if the day has rolled over."""
+        today = (as_of or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        if self.session_date and today != self.session_date:
+            self.session_consecutive_losses = 0
+            self.session_date = today
+            self._save()
         return self.session_consecutive_losses
 
     def increment_session_loss(self, signal_time: datetime) -> None:

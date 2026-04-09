@@ -265,6 +265,13 @@ def _process_signal(
             discord_send_signal({"formatted_text": formatted})
         except Exception as exc:
             logger.warning("Discord alert failed: %s", exc)
+        finally:
+            # Clean up temp chart file to prevent disk space leak
+            if chart_path and os.path.isfile(chart_path):
+                try:
+                    os.remove(chart_path)
+                except OSError:
+                    pass
 
         # MT5 order execution (Stage 11)
         if mt5_bridge is not None and Config.MT5_EXECUTION_ENABLED and sig.risk:
@@ -281,6 +288,7 @@ def _process_signal(
                     sl_price=sig.risk.stop_loss,
                     tp_price=sig.risk.tp1_price,
                     comment=f"GoldSignalAI {sig.confidence_pct:.0f}%",
+                    entry_price=sig.entry_price,
                 )
                 if order_result.success:
                     logger.info(

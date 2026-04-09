@@ -150,11 +150,11 @@ def test_compliance_ok():
 def test_daily_loss_stops_trading():
     with tempfile.TemporaryDirectory() as tmp:
         t = _make_tracker(tmp)
-        # Simulate big loss today
+        # Simulate daily loss that exceeds 3% limit but stays under 6% max drawdown
         trade = TradeRecord(
             timestamp="2025-03-11T14:00:00Z",
             direction="SELL", entry_price=2350.00,
-            pnl_usd=-600.0, status="closed_sl",
+            pnl_usd=-400.0, status="closed_sl",
             date=date.today().isoformat(),
         )
         t.record_trade(trade)

@@ -148,28 +148,37 @@ class TradingSignal:
 
 def _compute_rolling_atr_mean(df, current_atr: float, window: int = 28) -> float:
     """
-    Compute the rolling mean of ATR-14 over the last `window` bars.
+    Compute the rolling mean of Wilder's ATR-14 over the last `window` bars.
+
+    Uses EWM(span=14) smoothing to match the backtest engine's ATR calculation
+    (backtest/engine.py lines 1352-1355), then returns the mean of the last
+    `window` ATR values.
 
     Falls back to current_atr if the DataFrame doesn't have enough data.
     """
     try:
-        if df is None or len(df) < window:
+        if df is None or len(df) < window + 14:
             return current_atr
 
-        highs = df["high"].iloc[-window:]
-        lows = df["low"].iloc[-window:]
-        closes = df["close"].iloc[-window:]
+        high = df["high"]
+        low = df["low"]
+        close = df["close"]
 
-        # True Range calculation
-        prev_close = df["close"].iloc[-(window + 1):-1].values if len(df) > window else closes.values
+        # True Range series
+        prev_close = close.shift(1)
         tr = np.maximum(
-            highs.values - lows.values,
+            high - low,
             np.maximum(
-                np.abs(highs.values - prev_close),
-                np.abs(lows.values - prev_close),
+                (high - prev_close).abs(),
+                (low - prev_close).abs(),
             ),
         )
-        return float(np.mean(tr))
+
+        # Wilder's ATR-14 (EWM smoothing, matching backtest engine)
+        atr14 = tr.ewm(span=14, adjust=False).mean()
+
+        # Rolling mean of the last `window` ATR-14 values
+        return float(atr14.iloc[-window:].mean())
     except Exception:
         return current_atr
 
@@ -297,11 +306,12 @@ def generate_signal(
             confidence = 0.0
         else:
             # Apply adjusted confidence and position size multiplier
+            old_confidence = confidence
             confidence = meta_result.adjusted_confidence
             position_size_mult = meta_result.position_size_mult
 
-            if meta_result.adjusted_confidence > confidence:
-                logger.info("MetaDecision boosted confidence to %.1f%%", confidence)
+            if confidence > old_confidence:
+                logger.info("MetaDecision boosted confidence %.1f%% → %.1f%%", old_confidence, confidence)
 
     # ── Step 5: Risk calculation (only for actionable signals) ────────────
     risk = None

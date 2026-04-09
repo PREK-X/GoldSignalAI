@@ -10,18 +10,28 @@ Environment variable:
 
 import logging
 import os
+import time
 from typing import Optional
 
 import requests
 
 logger = logging.getLogger("GoldSignalAI.discord")
 
-_WEBHOOK_URL: Optional[str] = os.getenv("DISCORD_WEBHOOK_URL")
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1, 3, 5]  # seconds between retries
+
+
+def _get_webhook_url() -> Optional[str]:
+    """Read webhook URL on demand (not at import time) so late .env loads work."""
+    return os.getenv("DISCORD_WEBHOOK_URL")
 
 
 def send_message(text: str) -> bool:
     """
     POST a plain-text message to the Discord webhook.
+
+    Retries up to 3 times with backoff on transient errors (429, 5xx,
+    connection errors). Critical for breach alerts that must not be lost.
 
     Args:
         text: Message content (max 2000 chars; longer strings are truncated).
@@ -29,20 +39,33 @@ def send_message(text: str) -> bool:
     Returns:
         True on success, False on failure or if webhook not configured.
     """
-    if not _WEBHOOK_URL:
+    url = _get_webhook_url()
+    if not url:
         logger.warning("DISCORD_WEBHOOK_URL not set — skipping Discord alert.")
         return False
 
     # Discord message limit is 2000 characters
     payload = {"content": text[:2000]}
 
-    try:
-        resp = requests.post(_WEBHOOK_URL, json=payload, timeout=10)
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as exc:
-        logger.error("Discord webhook failed: %s", exc)
-        return False
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            if resp.status_code == 429:
+                # Discord rate limit — respect Retry-After header
+                retry_after = float(resp.headers.get("Retry-After", _RETRY_BACKOFF[attempt]))
+                logger.warning("Discord rate limited, retrying in %.1fs...", retry_after)
+                time.sleep(retry_after)
+                continue
+            resp.raise_for_status()
+            return True
+        except requests.RequestException as exc:
+            if attempt < _MAX_RETRIES - 1:
+                logger.warning("Discord webhook attempt %d failed: %s — retrying...", attempt + 1, exc)
+                time.sleep(_RETRY_BACKOFF[attempt])
+            else:
+                logger.error("Discord webhook failed after %d attempts: %s", _MAX_RETRIES, exc)
+                return False
+    return False
 
 
 def send_signal(signal_data: dict) -> bool:
@@ -62,7 +85,7 @@ def send_signal(signal_data: dict) -> bool:
     Returns:
         True on success, False otherwise.
     """
-    if not _WEBHOOK_URL:
+    if not _get_webhook_url():
         logger.warning("DISCORD_WEBHOOK_URL not set — skipping Discord alert.")
         return False
 

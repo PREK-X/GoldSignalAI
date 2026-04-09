@@ -39,7 +39,7 @@ venv/bin/python -m backtest.engine
 # Dashboard
 venv/bin/python -m streamlit run dashboard/app.py
 
-# Tests (159/161 pass — 2 pre-existing failures)
+# Tests (160/161 pass — 1 pre-existing DST failure)
 venv/bin/python -m pytest tests/ -v
 ```
 
@@ -75,49 +75,6 @@ SENTRY_DSN=            # Error monitoring (optional)
 
 ---
 
-## Key Decisions and Why
-
-- **Active-ratio scoring:** old `/10` made 70% unreachable.
-  New: `dominant / (bull + bear)` ignores neutrals
-- **NY session only:** diagnostic 277 signals: NY 63.3% WR,
-  London 33.9%. Session filter is the single biggest edge
-- **ML disabled:** XGBoost 47% (trained on indicator outputs =
-  redundant). Need independent features -> macro pipeline built
-- **SL = ATR x 1.5 (~130 pips):** gold M15 median candle = 125
-  pips. Old 30-pip SL = noise stop-out every trade
-- **9 indicators FROZEN:** adding 4 more in Stage 2 dropped
-  PF 1.23 -> 0.90. Do not add without per-indicator backtest
-- **RANGING blocked (not reduced):** RANGING trades avg $+17.87
-  vs $+81.64 TRENDING, with disproportionate DD
-- **FN daily ceiling 2.8%:** pre-emptive block below 3.0% hard
-  limit. Dropped max daily loss from 3.00% to 2.13%
-- **38% base WR is fine:** with 3.3:1 R:R, break-even is 23%
-- **PrecomputedIndicators:** computing 12 indicators per bar on
-  48k bars takes hours without the shim in indicators.py
-
----
-
-## Critical Bugs (Historical)
-
-| Bug                          | Impact            | Fix                    |
-|------------------------------|-------------------|------------------------|
-| 70% confidence unreachable   | 0 signals ever    | Active-ratio scoring   |
-| SL capped at 30 pips        | Every trade hit SL| 50-200 pips ATR-based  |
-| BBands in scoring            | 42.3% accuracy    | Removed from voting    |
-| London session trading       | 33.9% WR          | NY-only session filter |
-| yfinance 60-day limit        | Invalid backtest  | Polygon.io added       |
-| H1 resampled from M15       | Wrong H1 values   | Separate H1 fetch      |
-| ML blocking good signals     | PF degraded       | USE_ML_FILTER=False    |
-| MIN_ACTIVE=3                 | PF->1.08, DD 15%  | Reverted to 4          |
-| Backtest hang on 48k bars    | Never completes   | PrecomputedIndicators  |
-| Polygon 5yr fetch            | Timeout/hang      | bars=47000 cap         |
-| Stage 2 indicators           | PF->0.90          | Reverted to commit 88c1496 |
-| Parallel Polygon 429         | Both fetches fail  | Sequential + 300s timeout |
-| Telegram blocked in PK       | No alerts          | Discord webhook        |
-| LGBM macro merge bug         | 0 samples          | Set index.name in features.py |
-
----
-
 ## Integration Gaps
 
 | File               | Gap                                    | Priority |
@@ -144,6 +101,14 @@ Use MCP tools BEFORE Grep/Glob/Read:
 | `get_architecture_overview` | High-level structure           |
 
 Fall back to Grep/Glob/Read only when graph doesn't cover it.
+
+---
+
+## Obsidian Knowledge Base
+
+Detailed references moved to Obsidian vault under `GoldSignalAI/` to reduce token load.
+Query via MCP when needed: file map, indicators, signal flow, config values,
+prop firm rules, backtest history, stages, decision log, critical bugs.
 
 ---
 

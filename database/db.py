@@ -196,10 +196,10 @@ def save_trade(trade_data: dict) -> Optional[int]:
 
 
 def update_trade_result(trade_id: int, result: str, pnl_usd: float = 0.0, pnl_pips: float = 0.0) -> bool:
-    """Update a trade's outcome. Returns True on success."""
+    """Update a trade's outcome. Returns True if a row was actually updated."""
     try:
         conn = _get_conn()
-        conn.execute(
+        cur = conn.execute(
             """UPDATE trades
                SET result = ?, status = 'closed', pnl_usd = ?, pnl_pips = ?,
                    closed_at = ?
@@ -207,8 +207,11 @@ def update_trade_result(trade_id: int, result: str, pnl_usd: float = 0.0, pnl_pi
             (result, pnl_usd, pnl_pips, datetime.now(timezone.utc).isoformat(), trade_id),
         )
         conn.commit()
+        updated = cur.rowcount > 0
         conn.close()
-        return True
+        if not updated:
+            logger.warning("update_trade_result: trade_id=%d not found (0 rows updated)", trade_id)
+        return updated
     except Exception as exc:
         logger.error("Failed to update trade %d: %s", trade_id, exc)
         return False

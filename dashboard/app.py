@@ -322,7 +322,8 @@ def _ensure_tables() -> None:
                 bearish_count INTEGER,
                 ml_confirms INTEGER,
                 reason TEXT,
-                is_paused INTEGER DEFAULT 0
+                is_paused INTEGER DEFAULT 0,
+                forward_test INTEGER DEFAULT 0
             )""")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
@@ -1180,7 +1181,7 @@ def tab_challenge_progress(account_balance: float) -> None:
     with g1:
         fig = make_gauge(
             "PnL Progress",
-            abs(status["profit_pct"]),
+            max(0, status["profit_pct"]),
             status["profit_target_pct"],
             unit="%",
             warning=status["profit_target_pct"] * 0.8,

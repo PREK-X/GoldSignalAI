@@ -23,6 +23,7 @@ plus the merged final decision.
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
@@ -100,6 +101,7 @@ def _analyse_timeframe(
     n_candles: int = Config.LOOKBACK_CANDLES,
     symbol:    str = Config.SYMBOL,
     df_override: Optional[pd.DataFrame] = None,
+    bar_time:  Optional[pd.Timestamp] = None,
 ) -> TimeframeAnalysis:
     """
     Run the full analysis pipeline on a single timeframe.
@@ -156,7 +158,7 @@ def _analyse_timeframe(
 
     # ── Step 3: Score ─────────────────────────────────────────────────────
     try:
-        score = score_signal(indicators, sr_levels, fib_levels, candlestick)
+        score = score_signal(indicators, sr_levels, fib_levels, candlestick, bar_time=bar_time)
     except Exception as exc:
         logger.exception("[%s] Scoring error: %s", label, exc)
         return TimeframeAnalysis(
@@ -280,9 +282,36 @@ def analyse(
     """
     logger.info("Running multi-timeframe analysis for %s…", symbol)
 
+    # Extract M15 bar_time for session gate (only applies to primary TF).
+    # The session gate blocks signals outside NY hours (13:00-21:59 UTC).
+    m15_bar_time = None
+    m15_src = df_m15 if df_m15 is not None else None
+    if m15_src is not None and len(m15_src) > 0:
+        m15_bar_time = m15_src.index[-1]
+    elif df_m15 is None:
+        # Will be fetched inside _analyse_timeframe; extract after
+        pass
+
     m15 = _analyse_timeframe(
-        Config.PRIMARY_TIMEFRAME, n_candles, symbol, df_override=df_m15
+        Config.PRIMARY_TIMEFRAME, n_candles, symbol, df_override=df_m15,
+        bar_time=m15_bar_time,
     )
+
+    # If bar_time wasn't available before fetch, extract from the fetched df
+    if m15_bar_time is None and m15.valid and m15.df is not None and len(m15.df) > 0:
+        m15_bar_time = m15.df.index[-1]
+        # Re-score M15 with the session gate active
+        if m15.score is not None:
+            from analysis.scoring import score_signal as _rescore
+            m15 = TimeframeAnalysis(
+                timeframe=m15.timeframe, df=m15.df, indicators=m15.indicators,
+                sr_levels=m15.sr_levels, fib_levels=m15.fib_levels,
+                candlestick=m15.candlestick,
+                score=_rescore(m15.indicators, m15.sr_levels, m15.fib_levels,
+                               m15.candlestick, bar_time=m15_bar_time),
+                valid=True,
+            )
+
     h1 = _analyse_timeframe(
         Config.CONFIRMATION_TIMEFRAME, n_candles, symbol, df_override=df_h1
     )

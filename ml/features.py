@@ -731,10 +731,12 @@ def build_lgbm_features(
     drop_cols = ["open", "high", "low", "close", "volume"]
     feat = feat.drop(columns=drop_cols, errors="ignore")
 
+    # ── Replace inf values (always, not just when dropping NaN) ─────────
+    feat = feat.replace([np.inf, -np.inf], np.nan)
+
     # ── Drop NaN rows ─────────────────────────────────────────────────────
     if dropna:
         before = len(feat)
-        feat = feat.replace([np.inf, -np.inf], np.nan)
         feat = feat.dropna()
         dropped = before - len(feat)
         if dropped > 0:

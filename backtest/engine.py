@@ -581,6 +581,18 @@ def _check_exit(
             tp1_lot = trade.lot_size * 0.5  # close 50%
             trade.tp1_pnl_pips = trade.tp1_pips
             trade.tp1_pnl_usd = trade.tp1_pips * pip_value * tp1_lot
+            # Check if TP2 also hit on the same bar
+            if bar_high >= trade.tp2_price:
+                trade.exit_price = trade.tp2_price
+                trade.exit_time = bar_time
+                trade.exit_reason = "TP2"
+                tp2_lot = trade.lot_size * 0.5
+                tp2_pnl_pips = trade.tp2_pips
+                tp2_pnl_usd = tp2_pnl_pips * pip_value * tp2_lot
+                trade.pnl_pips = trade.tp1_pnl_pips + tp2_pnl_pips
+                trade.pnl_usd = trade.tp1_pnl_usd + tp2_pnl_usd
+                trade.is_winner = True
+                return True
             # Move SL to breakeven for remaining position
             trade.stop_loss = trade.entry_price
             trade.sl_pips = 0.0
@@ -626,6 +638,18 @@ def _check_exit(
             tp1_lot = trade.lot_size * 0.5
             trade.tp1_pnl_pips = trade.tp1_pips
             trade.tp1_pnl_usd = trade.tp1_pips * pip_value * tp1_lot
+            # Check if TP2 also hit on the same bar
+            if bar_low <= trade.tp2_price:
+                trade.exit_price = trade.tp2_price
+                trade.exit_time = bar_time
+                trade.exit_reason = "TP2"
+                tp2_lot = trade.lot_size * 0.5
+                tp2_pnl_pips = trade.tp2_pips
+                tp2_pnl_usd = tp2_pnl_pips * pip_value * tp2_lot
+                trade.pnl_pips = trade.tp1_pnl_pips + tp2_pnl_pips
+                trade.pnl_usd = trade.tp1_pnl_usd + tp2_pnl_usd
+                trade.is_winner = True
+                return True
             trade.stop_loss = trade.entry_price
             trade.sl_pips = 0.0
             return False
@@ -825,24 +849,29 @@ def _compute_statistics(
     gross_loss = abs(sum(t.pnl_usd for t in trades if t.pnl_usd < 0))
     result.profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
 
-    # ── Sharpe ratio (annualized, using daily returns) ──────────────────
-    if len(usd_list) > 1:
+    # ── Sharpe ratio (annualized by actual trade frequency) ─────────────
+    if len(usd_list) > 1 and trades:
         returns = np.array(usd_list) / cfg.account_balance
         mean_ret = np.mean(returns)
         std_ret = np.std(returns, ddof=1)
         if std_ret > 0:
-            # Annualize: assume ~252 trading days, ~2 trades per day at most
-            result.sharpe_ratio = (mean_ret / std_ret) * np.sqrt(252)
+            # Annualize based on actual trades/year, not fixed 252
+            first_ts = trades[0].entry_time
+            last_ts = trades[-1].entry_time
+            span_days = max((last_ts - first_ts).total_seconds() / 86400, 1)
+            trades_per_year = len(trades) / (span_days / 365.25)
+            result.sharpe_ratio = (mean_ret / std_ret) * np.sqrt(max(trades_per_year, 1))
         else:
             result.sharpe_ratio = 0.0
     else:
         result.sharpe_ratio = 0.0
 
-    # ── Average R/R achieved ───────────────────────────────────────────
+    # ── Average R/R achieved (use initial_sl_pips — sl_pips is 0 after TP1)
     rr_list = []
     for t in trades:
-        if t.sl_pips > 0 and t.pnl_pips != 0:
-            rr_list.append(t.pnl_pips / t.sl_pips if t.sl_pips > 0 else 0)
+        ref_sl = t.initial_sl_pips or t.sl_pips
+        if ref_sl > 0 and t.pnl_pips != 0:
+            rr_list.append(t.pnl_pips / ref_sl)
     result.avg_rr_achieved = np.mean(rr_list) if rr_list else 0.0
 
     # ── Equity curve & drawdown ────────────────────────────────────────
@@ -976,6 +1005,12 @@ def _simulate_prop_firm(
         daily_loss_pct = abs(min(0, daily_pnl[day_key])) / account_balance * 100
         if daily_loss_pct > max_daily_loss_pct:
             max_daily_loss_pct = daily_loss_pct
+
+        # FundedNext daily ceiling (2.8%) — pre-emptive block matching live path
+        if (firm_key.startswith("FundedNext") and
+                daily_loss_pct >= Config.FUNDEDNEXT_DAILY_CEILING_PCT):
+            # Skip remaining trades on this day (matching live ComplianceTracker)
+            continue
 
         if daily_loss_pct >= profile.daily_loss_limit:
             breach_reason = (

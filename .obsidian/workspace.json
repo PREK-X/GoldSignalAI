@@ -1,0 +1,203 @@
+{
+  "main": {
+    "id": "a73b5a3b841686c8",
+    "type": "split",
+    "children": [
+      {
+        "id": "a5ce82c3ccd8a0ea",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "2d3cd2cab9a97593",
+            "type": "leaf",
+            "state": {
+              "type": "empty",
+              "state": {},
+              "icon": "lucide-file",
+              "title": "New tab"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "9c88a9209eadc3da",
+    "type": "split",
+    "children": [
+      {
+        "id": "06879fad5a22f55d",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "02635faee0bff76e",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "22880e628c0e2b40",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "b26e2dd38273d499",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "e5477134d812d279",
+    "type": "split",
+    "children": [
+      {
+        "id": "9e13d48d40907377",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "77e48035b35b5d08",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "GoldSignalAI/History/Stage Progress.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for Stage Progress"
+            }
+          },
+          {
+            "id": "f44226789e6bbeac",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "GoldSignalAI/History/Stage Progress.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from Stage Progress"
+            }
+          },
+          {
+            "id": "0fb6087a4e54b52e",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "b9feeb77ea74fc42",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          },
+          {
+            "id": "4863c25cdb39e80c",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "GoldSignalAI/History/Stage Progress.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of Stage Progress"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Open quick switcher": false,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": false,
+      "daily-notes:Open today's daily note": false,
+      "templates:Insert template": false,
+      "command-palette:Open command palette": false,
+      "bases:Create new base": false
+    }
+  },
+  "active": "02635faee0bff76e",
+  "lastOpenFiles": [
+    "database/goldsignalai.db-wal",
+    "GoldSignalAI/History/Decision Log.md",
+    "GoldSignalAI/History/Critical Bugs.md",
+    "GoldSignalAI/History/Backtest Results.md",
+    "GoldSignalAI/Config/Prop Firm Rules.md",
+    "GoldSignalAI/Config/Current Config Values.md",
+    "GoldSignalAI/Architecture/Signal Flow.md",
+    "GoldSignalAI/Architecture/Indicator Table.md",
+    "GoldSignalAI/Architecture/File Map.md",
+    "GoldSignalAI/History/Stage Progress.md",
+    "GoldSignalAI/History",
+    "GoldSignalAI/Config",
+    "GoldSignalAI/Architecture",
+    "GoldSignalAI",
+    "database/goldsignalai.db-shm",
+    "main.py.tmp.150167.1775735212645",
+    "analysis/__pycache__/indicators.cpython-312.pyc.140161214805696",
+    "signals/__pycache__/generator.cpython-312.pyc.140161224764288"
+  ]
+}

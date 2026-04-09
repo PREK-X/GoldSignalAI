@@ -157,19 +157,21 @@ class MT5Bridge:
         sl_price: float,
         tp_price: float,
         comment: str = "GoldSignalAI",
+        entry_price: Optional[float] = None,
     ) -> OrderResult:
         if self.is_simulation:
-            return self._sim_place_order(symbol, direction, volume, sl_price, tp_price, comment)
+            return self._sim_place_order(symbol, direction, volume, sl_price, tp_price, comment, entry_price)
         return self._mt5_place_order(symbol, direction, volume, sl_price, tp_price, comment)
 
     def _sim_place_order(
-        self, symbol, direction, volume, sl_price, tp_price, comment
+        self, symbol, direction, volume, sl_price, tp_price, comment, entry_price=None
     ) -> OrderResult:
         self._sim_ticket_counter += 1
         ticket = self._sim_ticket_counter
 
-        # Use midpoint of SL and TP as simulated entry
-        entry_price = (sl_price + tp_price) / 2
+        # Use provided entry price, or fall back to midpoint estimate
+        if entry_price is None:
+            entry_price = (sl_price + tp_price) / 2
 
         pos = PositionInfo(
             ticket=ticket,

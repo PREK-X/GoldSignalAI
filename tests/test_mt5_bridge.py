@@ -215,10 +215,10 @@ class TestStateManager:
         now = datetime(2026, 4, 2, 14, 0, 0, tzinfo=timezone.utc)
 
         mgr.increment_session_loss(now)
-        assert mgr.get_session_losses() == 1
+        assert mgr.get_session_losses(as_of=now) == 1
 
         mgr.increment_session_loss(now)
-        assert mgr.get_session_losses() == 2
+        assert mgr.get_session_losses(as_of=now) == 2
 
     def test_session_reset_on_new_day(self, tmp_path):
         mgr, _ = self._make_manager(tmp_path)
@@ -227,28 +227,28 @@ class TestStateManager:
 
         mgr.increment_session_loss(day1)
         mgr.increment_session_loss(day1)
-        assert mgr.get_session_losses() == 2
+        assert mgr.get_session_losses(as_of=day1) == 2
 
         # New day resets counter before incrementing
         mgr.increment_session_loss(day2)
-        assert mgr.get_session_losses() == 1
+        assert mgr.get_session_losses(as_of=day2) == 1
 
     def test_reset_session_losses(self, tmp_path):
         mgr, _ = self._make_manager(tmp_path)
         now = datetime(2026, 4, 2, 14, 0, 0, tzinfo=timezone.utc)
         mgr.increment_session_loss(now)
         mgr.reset_session_losses()
-        assert mgr.get_session_losses() == 0
+        assert mgr.get_session_losses(as_of=now) == 0
 
     def test_register_trade_outcome_loss(self, tmp_path):
         mgr, _ = self._make_manager(tmp_path)
         now = datetime(2026, 4, 2, 14, 0, 0, tzinfo=timezone.utc)
 
         mgr.register_trade_outcome("T1", "LOSS", now)
-        assert mgr.get_session_losses() == 1
+        assert mgr.get_session_losses(as_of=now) == 1
 
         mgr.register_trade_outcome("T2", "LOSS", now)
-        assert mgr.get_session_losses() == 2
+        assert mgr.get_session_losses(as_of=now) == 2
 
     def test_register_trade_outcome_win_resets(self, tmp_path):
         mgr, _ = self._make_manager(tmp_path)
@@ -256,10 +256,10 @@ class TestStateManager:
 
         mgr.register_trade_outcome("T1", "LOSS", now)
         mgr.register_trade_outcome("T2", "LOSS", now)
-        assert mgr.get_session_losses() == 2
+        assert mgr.get_session_losses(as_of=now) == 2
 
         mgr.register_trade_outcome("T3", "WIN", now)
-        assert mgr.get_session_losses() == 0
+        assert mgr.get_session_losses(as_of=now) == 0
 
     def test_persistence(self, tmp_path):
         """State survives across manager instances."""
@@ -274,6 +274,6 @@ class TestStateManager:
 
         # New instance loads from disk
         mgr2 = StateManager(state_file=path)
-        assert mgr2.get_session_losses() == 2
+        assert mgr2.get_session_losses(as_of=now) == 2
         assert mgr2.session_date == "2026-04-02"
         assert mgr2.last_signal_direction == "BUY"

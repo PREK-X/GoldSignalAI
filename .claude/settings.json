@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "code-review-graph update --quiet"
+            "command": "code-review-graph update"
           }
         ]
       }
