@@ -252,6 +252,8 @@ class Config:
     WAIT_LOWER_BOUND_PCT = 30           # Below this = strong counter-signal
     WAIT_UPPER_BOUND_PCT = 70           # Above this = tradeable signal
 
+    REQUIRE_H1_AGREEMENT  = True         # False → M15 direction fires without H1 confirmation
+
     # ── Machine Learning ─────────────────────────────────────────────────────
     USE_ML_FILTER        = False        # CV 46.7% — no edge; disabled per 2yr backtest validation
     ML_MODEL_PATH        = "models/goldSignalAI_model.pkl"

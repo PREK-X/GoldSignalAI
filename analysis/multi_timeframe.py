@@ -196,7 +196,7 @@ def _merge_decisions(
     """
     latest_close = 0.0
 
-    # Handle failures
+    # M15 failure is always terminal — cannot produce a signal without primary TF
     if not m15.valid or m15.score is None:
         return MultiTimeframeResult(
             m15=m15, h1=h1, direction="WAIT", confidence_pct=0.0,
@@ -204,6 +204,34 @@ def _merge_decisions(
             reason="WAIT — M15 analysis failed, cannot confirm",
             latest_close=latest_close,
         )
+
+    if m15.indicators:
+        latest_close = m15.indicators.latest_close
+
+    # ── H1 agreement disabled: pass M15 result through ───────────────────
+    if not Config.REQUIRE_H1_AGREEMENT:
+        m15_dir  = m15.score.direction
+        m15_conf = m15.score.confidence_pct
+        h1_note  = ""
+        if h1.valid and h1.score is not None:
+            h1_note = (
+                f" | H1={h1.score.direction}({h1.score.confidence_pct:.0f}%)"
+                f" [reference only]"
+            )
+        logger.info(
+            "H1 agreement disabled — using M15 only: %s(%.0f%%)%s",
+            m15_dir, m15_conf, h1_note,
+        )
+        return MultiTimeframeResult(
+            m15=m15, h1=h1,
+            direction=m15_dir,
+            confidence_pct=m15_conf,
+            timeframes_agree=False,
+            reason=f"M15-only ({m15_conf:.0f}%) — H1 agreement disabled{h1_note}",
+            latest_close=latest_close,
+        )
+
+    # ── H1 agreement required (REQUIRE_H1_AGREEMENT = True — default) ─────
     if not h1.valid or h1.score is None:
         return MultiTimeframeResult(
             m15=m15, h1=h1, direction="WAIT", confidence_pct=0.0,
@@ -212,13 +240,10 @@ def _merge_decisions(
             latest_close=latest_close,
         )
 
-    m15_dir = m15.score.direction
-    h1_dir  = h1.score.direction
+    m15_dir  = m15.score.direction
+    h1_dir   = h1.score.direction
     m15_conf = m15.score.confidence_pct
     h1_conf  = h1.score.confidence_pct
-
-    if m15.indicators:
-        latest_close = m15.indicators.latest_close
 
     # ── Agreement check ───────────────────────────────────────────────────
     agree     = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
