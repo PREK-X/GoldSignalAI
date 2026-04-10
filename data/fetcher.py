@@ -454,6 +454,22 @@ def _fetch_polygon(
     df = _normalise_columns(df)
     df = _validate_ohlcv(df, f"Polygon:{timeframe}")
 
+    # Freshness gate: when Gold market is open, reject data older than 2h.
+    # Polygon free tier for forex only provides EOD data — today's intraday
+    # bars are absent.  Returning None here lets get_market_data() fall
+    # through to yfinance, which provides live M15 bars up to 60 days back.
+    if is_market_open() and not df.empty:
+        age_s = (now_dt - df.index[-1]).total_seconds()
+        if age_s > 7200:  # 2 hours
+            logger.warning(
+                "DATA STALE — Polygon latest candle is %.1fh old (%s UTC). "
+                "Free-tier Polygon does not include live intraday bars. "
+                "Falling back to next source.",
+                age_s / 3600,
+                df.index[-1].strftime("%Y-%m-%d %H:%M"),
+            )
+            return None
+
     # Trim to requested candle count
     if len(df) > n_candles:
         df = df.iloc[-n_candles:]

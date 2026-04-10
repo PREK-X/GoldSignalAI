@@ -221,17 +221,28 @@ def _merge_decisions(
         latest_close = m15.indicators.latest_close
 
     # ── Agreement check ───────────────────────────────────────────────────
-    agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
+    agree     = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
+    both_wait = (m15_dir == "WAIT") and (h1_dir == "WAIT")
 
     if agree:
-        # Both timeframes confirm — use the weaker confidence
+        # Both timeframes confirm the same direction — use the weaker confidence
         direction  = m15_dir
         confidence = min(m15_conf, h1_conf)
         reason = (
             f"{direction} confirmed on M15 ({m15_conf:.0f}%) + H1 ({h1_conf:.0f}%) "
             f"— confidence {confidence:.0f}%"
         )
+    elif both_wait:
+        # Both timeframes independently say WAIT — not a directional disagreement.
+        # Preserve the individual scores so display/logging reflects real strength.
+        direction  = "WAIT"
+        confidence = min(m15_conf, h1_conf)
+        reason = (
+            f"WAIT — both timeframes: M15=WAIT({m15_conf:.0f}%) "
+            f"H1=WAIT({h1_conf:.0f}%)"
+        )
     else:
+        # True directional conflict (e.g. M15=BUY vs H1=SELL, or one WAIT)
         direction  = "WAIT"
         confidence = 0.0
         reason = (

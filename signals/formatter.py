@@ -86,14 +86,15 @@ def format_signal(sig: TradingSignal) -> str:
     # Timeframe
     tf_line = sig.timeframe_label
 
-    # Confidence — for WAIT signals show the underlying M15 raw score so the
+    # Confidence — show merged confidence plus underlying raw scores so the
     # user can see how close the market is to a tradeable signal.
     if d == "WAIT":
         m15_score = sig.mtf_result.m15.score
         h1_score  = sig.mtf_result.h1.score
         m15_raw = m15_score.raw_confidence if m15_score else 0.0
         h1_raw  = h1_score.raw_confidence  if h1_score  else 0.0
-        conf_line = f"0% (M15:{m15_raw:.0f}% H1:{h1_raw:.0f}% — need {Config.MIN_CONFIDENCE_PCT}%)"
+        merged  = sig.confidence_pct  # 0 for true disagreement, min(m15,h1) for mutual WAIT
+        conf_line = f"{merged:.0f}% (M15:{m15_raw:.0f}% H1:{h1_raw:.0f}% — need {Config.MIN_CONFIDENCE_PCT}%)"
     else:
         conf_line = f"{sig.confidence_pct:.0f}%"
 
