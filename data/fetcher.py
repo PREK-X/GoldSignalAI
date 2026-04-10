@@ -458,7 +458,11 @@ def _fetch_polygon(
     # Polygon free tier for forex only provides EOD data — today's intraday
     # bars are absent.  Returning None here lets get_market_data() fall
     # through to yfinance, which provides live M15 bars up to 60 days back.
-    if is_market_open() and not df.empty:
+    #
+    # Skip the gate for large historical requests (n_candles > 2000) — those
+    # are backtest/training fetches that are supposed to use historical data
+    # and must not fall back to yfinance which only covers 60 days.
+    if n_candles <= 2000 and is_market_open() and not df.empty:
         age_s = (now_dt - df.index[-1]).total_seconds()
         if age_s > 7200:  # 2 hours
             logger.warning(
