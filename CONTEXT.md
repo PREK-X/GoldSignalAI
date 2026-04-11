@@ -4,9 +4,10 @@
 
 ---
 
-## Current Status (2026-04-10)
+## Current Status (2026-04-11)
 
 **All 16 stages complete. Forward testing phase.**
+Post-audit re-baseline: MAX_CONFIDENCE_PCT=72 (see Experiments section).
 Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
@@ -37,20 +38,27 @@ Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
 
-## Latest Backtest (Stage 15 Phase 2.5)
+## Latest Backtest (Post-Audit Re-Baseline 2026-04-11)
 
 | Metric   | Value  |
 |----------|--------|
-| Trades   | 75     |
-| WR       | 72.0%  |
-| PF       | 2.15   |
-| DD       | 4.99%  |
-| Sharpe   | 5.31   |
-| PnL      | +$4,818|
+| Trades   | 70     |
+| WR       | 75.7%  |
+| PF       | 2.24   |
+| DD       | 7.44%  |
+| Sharpe   | 1.96   |
+| PnL      | +$4,289|
 | Period   | Apr 2024 - Mar 2026 (2yr Polygon) |
 
 Prop firm sims: FTMO, FN 1-Step, FN 2-Step, The5ers, E8, MFF,
 Apex, Custom — **all 8 pass**.
+
+Note: supersedes Stage 15 Ph2.5 baseline (75 trades, PF 2.15, DD 4.99%,
+Sharpe 5.31). The old baseline is no longer reproducible because the
+2026-04-09 audit fixes (session-gate bar_time threading, ATR Wilder's
+EWM, session-loss rollover) changed the signal distribution. The new
+baseline is higher quality on WR/PF but higher backtest DD; all 8 prop
+firm sims still pass and the challenge-period DD per FN sim is 4.30%.
 
 ---
 
@@ -70,7 +78,13 @@ Apex, Custom — **all 8 pass**.
 | Stage 10: News filter       | 107    | 72.9% | 2.45 | 3.60%  | +$6,748 |
 | Stage 15 Ph1: Full          | 153    | 67.3% | 2.11 | 13.12% | +$9,938 |
 | Stage 15 Ph2: RANGING block | 75     | 72.0% | 2.15 | 4.99%  | +$4,818 |
-| **Stage 15 Ph2.5: FN ceil** | 75     | 72.0% | 2.15 | 4.99%  | +$4,818 |
+| Stage 15 Ph2.5: FN ceil     | 75     | 72.0% | 2.15 | 4.99%  | +$4,818 |
+| Post-audit ceiling=None     | 434    | —     | —    | —      | —       |
+| Post-audit ceiling=90       | 314    | 62.7% | 1.34 | 16.63% | +$9,224 |
+| Post-audit ceiling=80       | 297    | 64.0% | 1.49 | 8.82%  | +$11,666|
+| Post-audit ceiling=75       | 174    | 66.7% | 1.66 | 6.68%  | +$9,640 |
+| Post-audit ceiling=70       | 36     | 69.4% | 2.00 | 2.93%  | +$1,205 |
+| **Post-audit ceiling=72**   | 70     | 75.7% | 2.24 | 7.44%  | +$4,289 |
 
 Stage 16 = deployment only, no metric changes.
 
@@ -81,7 +95,7 @@ Stage 16 = deployment only, no metric changes.
 ### In config.py
 ```
 MIN_CONFIDENCE_PCT           = 65
-MAX_CONFIDENCE_PCT           = 75
+MAX_CONFIDENCE_PCT           = 72   # post-audit re-tuned 2026-04-11
 ATR_SL_MULTIPLIER            = 1.5   (SL ~130 pips)
 MIN_SL_PIPS / MAX_SL_PIPS   = 50 / 200
 TOTAL_INDICATORS             = 9
@@ -126,6 +140,55 @@ Re-enable ML models after 150+ real trade outcomes for retraining.
 
 ---
 
+## Experiments (2026-04-11)
+
+### MAX_CONFIDENCE Ceiling Sweep
+
+Commit `e0adc3b` removed the over-consensus ceiling from
+`analysis/scoring.py` to fix a bug where valid 88% signals were
+blocked. The removal was too broad — with no ceiling the backtest
+produced 434 trades on the post-audit codebase. Swept ceiling values
+to find the optimum:
+
+| Ceiling | Trades | WR    | PF   | DD    | FN 1-Step | All 8 firms |
+|---------|--------|-------|------|-------|-----------|-------------|
+| None    | 434    | —     | —    | —     | —         | —           |
+| 90      | 314    | 62.7% | 1.34 | 16.63%| FAIL      | 5/8         |
+| 80      | 297    | 64.0% | 1.49 | 8.82% | FAIL      | 6/8         |
+| 75      | 174    | 66.7% | 1.66 | 6.68% | PASS      | —           |
+| **72**  | **70** | **75.7%** | **2.24** | **7.44%** | **PASS** | **8/8** |
+| 70      | 36     | 69.4% | 2.00 | 2.93% | PASS      | 8/8         |
+
+**Chosen: 72.** Best profit factor and win rate in the sweep, with
+a trade count close to the pre-audit Stage 15 baseline (70 vs 75).
+All 8 prop firm sims pass. Rationale:
+- Ceiling=70 is safer on raw DD but only 36 trades in 2 years is too
+  thin — poor statistical confidence and low challenge-period PnL.
+- Ceiling≥75 re-admits lagging over-consensus signals that hurt PF.
+- Ceiling=72 sits on the knee of the curve: blocks 100% raw signals
+  and anything reaching 73% after bonuses, but keeps the 65–72% band
+  that carries most of the edge.
+
+### H1 Agreement Experiment (at ceiling=72)
+
+Tested whether the `REQUIRE_H1_AGREEMENT` flag still earns its cost
+on the post-audit codebase.
+
+| Flag      | Trades | WR    | PF   | DD    | Sharpe | FN 1-Step |
+|-----------|--------|-------|------|-------|--------|-----------|
+| **True**  | **70** | **75.7%** | **2.24** | **7.44%** | **1.96** | PASS |
+| False     | 232    | 60.3% | 1.34 | 12.93%| 1.23   | PASS      |
+
+Disabling H1 agreement triples trade count but collapses quality
+across every metric. Kept `REQUIRE_H1_AGREEMENT = True`.
+
+Note: the `REQUIRE_H1_AGREEMENT` flag was previously only plumbed
+through `analysis/multi_timeframe.py` (live path). `backtest/engine.py`
+hardcoded the agreement rule. Fixed in the same commit as this
+experiment — the backtest now honours the flag.
+
+---
+
 ## Known Issues
 
 | Issue                    | Impact              | Status / Workaround           |
@@ -159,6 +222,8 @@ Re-enable ML models after 150+ real trade outcomes for retraining.
 | LGBM macro merge bug       | 0 samples            | Set index.name in features.py|
 | Stale Polygon data         | Bot used yesterday's bars | +1 day end_date — FIXED 2026-04-08 |
 | Scoring WAIT at 88% conf   | Valid signals blocked | MAX_CONFIDENCE ceiling gate removed — FIXED 2026-04-08 |
+| Ceiling removal too broad  | Trade count 75→434, PF collapse | Ceiling re-added + retuned to 72 — FIXED 2026-04-11 |
+| H1 flag unplumbed in BT    | backtest/engine.py ignored REQUIRE_H1_AGREEMENT | Wired flag through _analyze_bar — FIXED 2026-04-11 |
 
 ---
 

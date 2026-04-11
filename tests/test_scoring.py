@@ -48,20 +48,24 @@ class TestScoringEngine:
     """Tests for the score_signal function."""
 
     def test_strong_buy_signal(self):
-        """3 bull / 1 bear (75% active ratio) should produce a BUY signal."""
-        ind = _make_indicators(bulls=3, bears=1, neutrals=5)
+        """4 bull / 2 bear (66.67% active ratio) should produce a BUY signal.
+
+        Must land in the 65-72 confidence band (MIN_CONFIDENCE..MAX_CONFIDENCE)
+        — 3/1 = 75% would hit the over-consensus ceiling.
+        """
+        ind = _make_indicators(bulls=4, bears=2, neutrals=3)
         # Use bar_time in active session (14:00 UTC = NY session)
         bar_time = datetime(2025, 1, 6, 14, 0, tzinfo=timezone.utc)  # Monday
         result = score_signal(ind, bar_time=bar_time)
 
         assert result.direction == "BUY"
         assert result.confidence_pct >= 65
-        assert result.bullish_count == 3
-        assert result.bearish_count == 1
+        assert result.bullish_count == 4
+        assert result.bearish_count == 2
 
     def test_strong_sell_signal(self):
-        """1 bull / 3 bear (75% active ratio) should produce a SELL signal."""
-        ind = _make_indicators(bulls=1, bears=3, neutrals=5)
+        """2 bull / 4 bear (66.67% active ratio) should produce a SELL signal."""
+        ind = _make_indicators(bulls=2, bears=4, neutrals=3)
         bar_time = datetime(2025, 1, 6, 15, 0, tzinfo=timezone.utc)
         result = score_signal(ind, bar_time=bar_time)
 
@@ -87,7 +91,7 @@ class TestScoringEngine:
 
     def test_session_gate_outside_hours(self):
         """Signals outside NY session (13-22 UTC) should be gated to WAIT."""
-        ind = _make_indicators(bulls=3, bears=1, neutrals=5)
+        ind = _make_indicators(bulls=4, bears=2, neutrals=3)
         bar_time = datetime(2025, 1, 6, 5, 0, tzinfo=timezone.utc)  # 05:00 UTC = Asian
         result = score_signal(ind, bar_time=bar_time)
 
@@ -96,7 +100,7 @@ class TestScoringEngine:
 
     def test_no_session_gate_without_bar_time(self):
         """Without bar_time, session gate should NOT trigger (safe for tests)."""
-        ind = _make_indicators(bulls=3, bears=1, neutrals=5)
+        ind = _make_indicators(bulls=4, bears=2, neutrals=3)
         result = score_signal(ind, bar_time=None)
 
         assert result.direction == "BUY"
