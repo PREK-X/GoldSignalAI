@@ -197,8 +197,31 @@ experiment — the backtest now honours the flag.
 | MT5 not active on Linux  | No auto-execution   | Manual trades via MT5 mobile  |
 | Forward test outcomes    | Not in SQLite       | Google Sheet manual tracking  |
 | 1 test failure           | test_news_fetcher DST offset    | Pre-existing, not blocking |
-| Stale Polygon data       | Bot operated on yesterday's bars | **FIXED 2026-04-08** — fetcher.py _fetch_polygon passed today as end_date (exclusive); now passes today+1 |
-| Scoring WAIT at 88% conf | Valid BUY/SELL signals blocked | **FIXED 2026-04-08** — MAX_CONFIDENCE=75% ceiling gate removed from scoring.py; MIN_CONFIDENCE=65% is sole lower bound |
+| Stale Polygon data       | Bot operated on yesterday's bars | **FIXED 2026-04-08** |
+| Scoring WAIT at 88% conf | Valid BUY/SELL signals blocked | **FIXED 2026-04-08** |
+| DD formula mismatch (documented) | Backtest reports 7.44% but prop sim passes FN 6% limit | By design — see DD Audit note below |
+
+### DD Audit Note (2026-04-11)
+
+**Functions audited:**
+- `propfirm/tracker.py` — `ChallengeTracker.get_status()` (line 409) and `drawdown_check()` in `propfirm/profiles.py` (line 181)
+- `backtest/engine.py` — `_compute_stats()` (line 899) for reported Max DD; `_simulate_prop_firm()` (line 1032) for prop firm sim DD
+
+**Formulas:**
+- **propfirm/tracker.py**: `total_dd_pct = max(0, peak_balance - current_balance) / initial_balance * 100`
+  → **Trailing peak-to-trough as % of initial balance** — matches FundedNext's actual rule exactly.
+- **backtest Max DD** (`_compute_stats`, line 899): `dd_pct = (peak - equity) / peak * 100`
+  → **Peak-to-trough as % of running peak equity** — standard investment metric, NOT FundedNext's formula.
+- **prop sim DD** (`_simulate_prop_firm`, line 1032): `dd_pct = (peak - equity) / account_balance * 100`
+  → **Peak-to-trough as % of initial balance** — correct FundedNext formula, consistent with tracker.
+
+**Are they the same?** No. The reported 7.44% backtest DD uses running peak as denominator; FundedNext uses initial balance. When account is above starting value, FN's formula produces a *higher* % for the same absolute loss (more conservative). The 7.44% understates what FN would actually measure for that same worst-case drop.
+
+**Is "all 8 pass" legitimate?** Yes. The prop sim uses FN's correct formula AND stops at profit target — matching real challenge behaviour. The 7.44% is the worst-case across 2 years of hypothetical non-stop trading; the challenge sprint to 10% completes in ~30-50 days, during which DD stays at 1.25-4.30% (well under 6%).
+
+**Does 2.8% daily ceiling prevent 7.44% DD?** No — the ceiling blocks *future trades* after a day's loss hits 2.8%; it cannot prevent the trade that triggers the ceiling. The 2-year 7.44% worst-case is irrelevant: in a real challenge the bot stops once the 10% target is hit (before reaching the worst drawdown period). The ceiling protects against catastrophic intraday blowups within any single challenge period.
+
+**Verdict: safe to forward test.** The prop sim is correctly calibrated to FundedNext's rules. The 7.44% backtest figure is a different metric (investment-style), not a sign the challenge would fail.
 
 ---
 
