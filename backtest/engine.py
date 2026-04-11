@@ -296,6 +296,7 @@ class BacktestResult:
 
     # Stage 8: meta-decision stats
     meta_blocked_hmm_crisis: int = 0
+    meta_blocked_hmm_ranging: int = 0
     meta_blocked_lgbm_vote: int = 0
     meta_blocked_session_loss: int = 0
     meta_blocked_confidence: int = 0
@@ -351,13 +352,15 @@ class BacktestResult:
                 lines.append(f"   {label:12s} {pct:5.1f}%")
             if self.regime_filtered > 0:
                 lines.append(f"   Signals filtered by CRISIS: {self.regime_filtered}")
-        meta_total = (self.meta_blocked_hmm_crisis + self.meta_blocked_lgbm_vote
+        meta_total = (self.meta_blocked_hmm_crisis + self.meta_blocked_hmm_ranging
+                      + self.meta_blocked_lgbm_vote
                       + self.meta_blocked_session_loss + self.meta_blocked_confidence
                       + self.meta_blocked_news)
         if meta_total > 0 or self.meta_boosted > 0:
             lines.append(f"{'─' * 50}")
             lines.append(f" Meta-Decision Layer (Stages 8+10):")
             lines.append(f"   Blocked by HMM CRISIS:      {self.meta_blocked_hmm_crisis}")
+            lines.append(f"   Blocked by HMM RANGING:     {self.meta_blocked_hmm_ranging}")
             lines.append(f"   Blocked by LGBM soft vote:   {self.meta_blocked_lgbm_vote}")
             lines.append(f"   Blocked by session losses:   {self.meta_blocked_session_loss}")
             lines.append(f"   Blocked by confidence adj:   {self.meta_blocked_confidence}")
@@ -1419,6 +1422,7 @@ def run_backtest(
     from signals.meta_decision import MetaDecision
     meta = MetaDecision()
     meta_blocked_hmm = 0
+    meta_blocked_ranging = 0
     meta_blocked_lgbm = 0
     meta_blocked_session = 0
     meta_blocked_confidence = 0
@@ -1647,6 +1651,8 @@ def run_backtest(
             elif "HMM CRISIS" in reason:
                 meta_blocked_hmm += 1
                 regime_filtered += 1
+            elif "HMM RANGING" in reason:
+                meta_blocked_ranging += 1
             elif "LGBM soft vote" in reason:
                 meta_blocked_lgbm += 1
             elif "Session loss" in reason:
@@ -1794,7 +1800,8 @@ def run_backtest(
         print(f"[Backtest] Signals found: {signals_found} | ML filtered: {ml_filtered} "
               f"| Deep filtered: {deep_filtered} "
               f"| CB blocked: {circuit_breaker_paused} | Trades taken: {len(trades)}")
-    print(f"[Backtest] Meta-Decision: HMM blocked={meta_blocked_hmm} | "
+    print(f"[Backtest] Meta-Decision: HMM CRISIS blocked={meta_blocked_hmm} | "
+          f"HMM RANGING blocked={meta_blocked_ranging} | "
           f"LGBM blocked={meta_blocked_lgbm} | Session blocked={meta_blocked_session} | "
           f"Confidence blocked={meta_blocked_confidence} | Boosted={meta_boosted} | "
           f"News/Vol blocked={meta_blocked_news}")
@@ -1828,6 +1835,7 @@ def run_backtest(
 
     # ── Step 4d: Add meta-decision stats to result ────────────────────
     result.meta_blocked_hmm_crisis = meta_blocked_hmm
+    result.meta_blocked_hmm_ranging = meta_blocked_ranging
     result.meta_blocked_lgbm_vote = meta_blocked_lgbm
     result.meta_blocked_session_loss = meta_blocked_session
     result.meta_blocked_confidence = meta_blocked_confidence
