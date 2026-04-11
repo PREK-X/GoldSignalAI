@@ -471,12 +471,16 @@ def _analyse_bar(
         m15_dir = m15_score.direction
         h1_dir = h1_score.direction
 
-        agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
-
-        if not agree:
-            return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
-
-        confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
+        if Config.REQUIRE_H1_AGREEMENT:
+            agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
+            if not agree:
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
+            confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
+        else:
+            # H1 agreement disabled — M15 direction alone, M15 confidence
+            if m15_dir not in ("BUY", "SELL"):
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
+            confidence = m15_score.confidence_pct
 
         # ── Risk calculation ───────────────────────────────────────────
         entry_price = m15_ind.latest_close
