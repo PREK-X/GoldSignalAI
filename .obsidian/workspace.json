@@ -4,11 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "a5ce82c3ccd8a0ea",
+        "id": "72d047b8edc21c6c",
         "type": "tabs",
         "children": [
           {
-            "id": "2d3cd2cab9a97593",
+            "id": "3dd876b5d301ab94",
             "type": "leaf",
             "state": {
               "type": "empty",
@@ -179,25 +179,27 @@
       "bases:Create new base": false
     }
   },
-  "active": "02635faee0bff76e",
+  "active": "3dd876b5d301ab94",
   "lastOpenFiles": [
     "database/goldsignalai.db-wal",
+    "database/goldsignalai.db-shm",
+    "database/macro_data.db-shm",
+    "models/hmm_regime.pkl",
+    "data/__pycache__/fetcher.cpython-312.pyc.140311128266160",
+    "GoldSignalAI/Architecture/File Map.md",
+    "GoldSignalAI/Architecture/Indicator Table.md",
     "GoldSignalAI/History/Decision Log.md",
     "GoldSignalAI/History/Critical Bugs.md",
     "GoldSignalAI/History/Backtest Results.md",
     "GoldSignalAI/Config/Prop Firm Rules.md",
     "GoldSignalAI/Config/Current Config Values.md",
     "GoldSignalAI/Architecture/Signal Flow.md",
-    "GoldSignalAI/Architecture/Indicator Table.md",
-    "GoldSignalAI/Architecture/File Map.md",
     "GoldSignalAI/History/Stage Progress.md",
     "GoldSignalAI/History",
     "GoldSignalAI/Config",
     "GoldSignalAI/Architecture",
     "GoldSignalAI",
-    "database/goldsignalai.db-shm",
     "main.py.tmp.150167.1775735212645",
-    "analysis/__pycache__/indicators.cpython-312.pyc.140161214805696",
-    "signals/__pycache__/generator.cpython-312.pyc.140161224764288"
+    "analysis/__pycache__/indicators.cpython-312.pyc.140161214805696"
   ]
 }
