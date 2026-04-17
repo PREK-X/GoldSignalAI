@@ -248,11 +248,13 @@ class Config:
     # DD 10.04%, +17.7% return, 112 trades
     TOTAL_INDICATORS     = 9            # 9 voted indicators (BBands removed — negative accuracy)
     MIN_CONFIDENCE_PCT   = 65           # Minimum to fire BUY/SELL signal
-    MAX_CONFIDENCE_PCT   = 72           # Cap — above this% indicates over-consensus (lagging)
+    MAX_CONFIDENCE_PCT   = 74           # Cap — above this% indicates over-consensus (lagging)
     WAIT_LOWER_BOUND_PCT = 30           # Below this = strong counter-signal
     WAIT_UPPER_BOUND_PCT = 70           # Above this = tradeable signal
 
     REQUIRE_H1_AGREEMENT  = True         # False → M15 direction fires without H1 confirmation
+    H1_FILTER_MODE        = "agree"      # "agree" | "noncontradict" | "off"
+    H1_WAIT_POSITION_MULT = 0.5          # Position size mult when H1=WAIT in noncontradict mode
 
     # ── Machine Learning ─────────────────────────────────────────────────────
     USE_ML_FILTER        = False        # CV 46.7% — no edge; disabled per 2yr backtest validation

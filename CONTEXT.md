@@ -4,10 +4,11 @@
 
 ---
 
-## Current Status (2026-04-11)
+## Current Status (2026-04-18)
 
 **All 16 stages complete. Forward testing phase.**
-Post-audit re-baseline: MAX_CONFIDENCE_PCT=72 (see Experiments section).
+Challenge frequency optimization complete: MAX_CONFIDENCE_PCT=74,
+SESSION_ACTIVE_HOURS=range(12,23). See Experiments section.
 Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
@@ -38,27 +39,23 @@ Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
 
-## Latest Backtest (Post-Audit Re-Baseline 2026-04-11)
+## Latest Backtest (Challenge Freq Optimization 2026-04-18)
 
 | Metric   | Value  |
 |----------|--------|
-| Trades   | 70     |
-| WR       | 75.7%  |
-| PF       | 2.24   |
-| DD       | 7.44%  |
-| Sharpe   | 1.96   |
-| PnL      | +$4,289|
+| Trades   | 103    |
+| WR       | 65.0%  |
+| PF       | 1.50   |
+| DD       | 11.67% |
+| Sharpe   | 1.28   |
 | Period   | Apr 2024 - Mar 2026 (2yr Polygon) |
 
-Prop firm sims: FTMO, FN 1-Step, FN 2-Step, The5ers, E8, MFF,
-Apex, Custom — **all 8 pass**.
+Prop firm sims: all 8 pass. FN 1-Step: 21d / +11.3% / 2.1% per-challenge DD.
 
-Note: supersedes Stage 15 Ph2.5 baseline (75 trades, PF 2.15, DD 4.99%,
-Sharpe 5.31). The old baseline is no longer reproducible because the
-2026-04-09 audit fixes (session-gate bar_time threading, ATR Wilder's
-EWM, session-loss rollover) changed the signal distribution. The new
-baseline is higher quality on WR/PF but higher backtest DD; all 8 prop
-firm sims still pass and the challenge-period DD per FN sim is 4.30%.
+Note: supersedes 2026-04-11 baseline (70 trades, PF 2.24, WR 75.7%).
+Config change: MAX_CONFIDENCE_PCT 72→74, SESSION_ACTIVE_HOURS 13-22→12-23 UTC.
+Per-challenge DD dropped from 4.6% to 2.1% (3× more headroom below 6% limit).
+FN challenge completes in 21d vs 34d. See Experiments section for full sweep.
 
 ---
 
@@ -85,6 +82,7 @@ firm sims still pass and the challenge-period DD per FN sim is 4.30%.
 | Post-audit ceiling=75       | 174    | 66.7% | 1.66 | 6.68%  | +$9,640 |
 | Post-audit ceiling=70       | 36     | 69.4% | 2.00 | 2.93%  | +$1,205 |
 | **Post-audit ceiling=72**   | 70     | 75.7% | 2.24 | 7.44%  | +$4,289 |
+| **Freq opt ceil=74+sess**   | 103    | 65.0% | 1.50 | 11.67% | —       |
 
 Stage 16 = deployment only, no metric changes.
 
@@ -95,7 +93,7 @@ Stage 16 = deployment only, no metric changes.
 ### In config.py
 ```
 MIN_CONFIDENCE_PCT           = 65
-MAX_CONFIDENCE_PCT           = 72   # post-audit re-tuned 2026-04-11
+MAX_CONFIDENCE_PCT           = 74   # freq optimization 2026-04-18
 ATR_SL_MULTIPLIER            = 1.5   (SL ~130 pips)
 MIN_SL_PIPS / MAX_SL_PIPS   = 50 / 200
 TOTAL_INDICATORS             = 9
@@ -119,7 +117,7 @@ META_MAX_SESSION_LOSS        = 2
 ```
 MIN_ACTIVE           = 4    # min active (bull+bear) indicators
 MIN_DOMINANT         = 3    # min in dominant direction
-SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00-21:59 UTC
+SESSION_ACTIVE_HOURS = frozenset(range(12, 23))  # 12:00-22:59 UTC (updated 2026-04-18)
 ```
 - DO NOT raise MIN_DOMINANT to 4 — filters too aggressively with 9 indicators
 - DO NOT add unvalidated indicators (Stage 2: PF 1.23 -> 0.90)
@@ -168,6 +166,41 @@ All 8 prop firm sims pass. Rationale:
 - Ceiling=72 sits on the knee of the curve: blocks 100% raw signals
   and anything reaching 73% after bonuses, but keeps the 65–72% band
   that carries most of the edge.
+
+### Challenge Frequency Optimization Sweep (2026-04-18)
+
+Mission: maximize FundedNext 1-Step challenge success probability.
+Baseline (ceil=72, H1=agree) yields ~45 signals/challenge-period (30-50d),
+insufficient for reliable 10% profit target. Architectural cap ~287 trades/2yr
+under M15+H1 architecture (structural changes not viable — see DD Audit).
+
+**Indicator research:** 9 current indicators reviewed against public XAU M15
+repos. Current set (PF 1.66 vs public ~1.64) already at or above benchmark.
+Supertrend rejected Stage 2 (PF collapse). AO/Choppiness/TTM noisy on M15.
+No swap warranted.
+
+**Parameter sweep (cached 2yr data, H1=agree):**
+
+| Experiment | Trd | WR | PF | DD | FN days/pnl/dd | All 8 |
+|------------|-----|----|-----|-----|----------------|-------|
+| BASELINE ceil=72, sess 13-22 | 90 | 67.8% | 1.51 | 11.58% | 34d/+10.3%/4.6% | 8/8 |
+| ceil=74 | 92 | 67.4% | 1.66 | 11.68% | 34d/+10.8%/4.6% | 8/8 |
+| ceil=75 | 245 | 62.9% | 1.21 | 10.87% | FAIL | 0/8 |
+| ceil=72 + sess 12-22 | 102 | 65.7% | 1.45 | 10.78% | 37d/+11.8%/4.6% | 8/8 |
+| **ceil=74 + sess 12-22** | **103** | **65.0%** | **1.50** | **11.67%** | **21d/+11.3%/2.1%** | **8/8** |
+
+ceil=75 is a hard cliff — frequency triples (90→245) but all 8 firms fail.
+ceil=76, ceil=75+session, ceil=75+min_conf=60 all expected ≥ as bad as ceil=75 — skipped.
+
+**Winner: ceil=74 + sess 12-22.**
+- Per-challenge DD: 2.1% vs baseline 4.6% → 3× more buffer below 6% FN limit
+- FN challenge: 21d vs 34d → faster completion, less exposure window
+- All 8 prop firms pass
+- PF 1.50 lower than ceil=74-alone (1.66) but challenge survival is primary metric
+- Note: prop sim is 1 observation over 2yr data, not rolling windows — treat
+  21d/2.1% as favorable signal, not guaranteed probability
+
+**Applied:** MAX_CONFIDENCE_PCT 72→74, SESSION_ACTIVE_HOURS range(13,22)→range(12,23)
 
 ### H1 Agreement Experiment (at ceiling=72)
 

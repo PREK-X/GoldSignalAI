@@ -60,10 +60,10 @@ SENTRY_DSN=            # Error monitoring (optional)
 ## Live Bot Behavior
 
 - Signal loop every 15 min (M15 candle close)
-- Only fires during NY session (13:00-22:00 UTC = 6PM-1AM PKT)
+- Fires during 12:00-22:59 UTC (8AM-7PM EST = 5PM-4AM PKT)
 - Discord alert when signal passes all gates
 - Dedup: same direction skipped for 4 hours
-- Expected frequency: ~1 signal per 6 days
+- Expected frequency: ~1 signal per 7 days (103 trades / 2yr)
 
 ---
 

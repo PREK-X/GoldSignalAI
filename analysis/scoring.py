@@ -55,8 +55,8 @@ MIN_CONFIDENCE   = Config.MIN_CONFIDENCE_PCT  # 65
 MAX_CONFIDENCE   = Config.MAX_CONFIDENCE_PCT  # 75 — above this = over-consensus, lagging
 
 # Trading sessions (UTC hours). Diagnostic: NY=63.3%, Overlap=53.6%, London=33.9%.
-# Only trade during NY session and London-NY overlap.
-SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00–21:59 UTC (NY + Overlap)
+# Extended to 12-22 UTC (adds pre-NY open + late NY close) for challenge frequency.
+SESSION_ACTIVE_HOURS = frozenset(range(12, 23))  # 12:00–22:59 UTC (London close + NY + late NY)
 
 # Bonus/penalty values (added to the raw percentage)
 BONUS_VERY_STRONG_TREND  =  3.0   # ADX > 40

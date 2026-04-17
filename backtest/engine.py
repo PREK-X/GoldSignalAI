@@ -416,9 +416,9 @@ def _resample_to_h1(m15_df: pd.DataFrame) -> pd.DataFrame:
 
 class _AnalysisResult:
     """Bundle of analysis outputs for a single bar."""
-    __slots__ = ("direction", "confidence", "risk", "bull_count", "bear_count", "sr_levels", "current_price")
+    __slots__ = ("direction", "confidence", "risk", "bull_count", "bear_count", "sr_levels", "current_price", "m15_score", "h1_score", "h1_status")
 
-    def __init__(self, direction, confidence, risk, bull_count, bear_count, sr_levels=None, current_price=0.0):
+    def __init__(self, direction, confidence, risk, bull_count, bear_count, sr_levels=None, current_price=0.0, m15_score=None, h1_score=None, h1_status="agree"):
         self.direction = direction
         self.confidence = confidence
         self.risk = risk
@@ -426,6 +426,9 @@ class _AnalysisResult:
         self.bear_count = bear_count
         self.sr_levels = sr_levels
         self.current_price = current_price
+        self.m15_score = m15_score
+        self.h1_score = h1_score
+        self.h1_status = h1_status  # "agree" | "wait" | "disagree"
 
 
 def _analyse_bar(
@@ -470,17 +473,41 @@ def _analyse_bar(
         # ── Multi-timeframe agreement ──────────────────────────────────
         m15_dir = m15_score.direction
         h1_dir = h1_score.direction
+        h1_status = "agree"  # default
 
-        if Config.REQUIRE_H1_AGREEMENT:
-            agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
-            if not agree:
-                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
-            confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
-        else:
+        h1_mode = getattr(Config, "H1_FILTER_MODE", "agree")
+
+        if h1_mode == "noncontradict":
+            # Non-contradiction: block only when H1 actively disagrees
+            if m15_dir not in ("BUY", "SELL"):
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count,
+                                       m15_score=m15_score, h1_score=h1_score, h1_status="disagree")
+            if h1_dir in ("BUY", "SELL") and h1_dir != m15_dir:
+                # H1 actively contradicts M15 — block
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count,
+                                       m15_score=m15_score, h1_score=h1_score, h1_status="disagree")
+            if h1_dir == m15_dir:
+                # Full agreement — use min confidence
+                confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
+                h1_status = "agree"
+            else:
+                # H1 is WAIT — M15 passes alone, M15 confidence
+                confidence = m15_score.confidence_pct
+                h1_status = "wait"
+        elif h1_mode == "off" or not Config.REQUIRE_H1_AGREEMENT:
             # H1 agreement disabled — M15 direction alone, M15 confidence
             if m15_dir not in ("BUY", "SELL"):
-                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count)
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count,
+                                       m15_score=m15_score, h1_score=h1_score)
             confidence = m15_score.confidence_pct
+            h1_status = "off"
+        else:
+            # Default: strict agreement required
+            agree = (m15_dir == h1_dir) and m15_dir in ("BUY", "SELL")
+            if not agree:
+                return _AnalysisResult("WAIT", 0.0, None, m15_score.bullish_count, m15_score.bearish_count,
+                                       m15_score=m15_score, h1_score=h1_score)
+            confidence = min(m15_score.confidence_pct, h1_score.confidence_pct)
 
         # ── Risk calculation ───────────────────────────────────────────
         entry_price = m15_ind.latest_close
@@ -496,6 +523,8 @@ def _analyse_bar(
             m15_dir, confidence, risk,
             m15_score.bullish_count, m15_score.bearish_count,
             sr_levels=m15_sr, current_price=entry_price,
+            m15_score=m15_score, h1_score=h1_score,
+            h1_status=h1_status,
         )
 
     except Exception as exc:
@@ -1722,6 +1751,12 @@ def run_backtest(
         # Apply meta-decision position size multiplier (RANGING = 0.5x)
         if meta_result.position_size_mult < 1.0:
             risk_pct *= meta_result.position_size_mult
+            risk_pct = max(0.1, risk_pct)
+
+        # Apply H1 non-contradiction position size reduction
+        if getattr(analysis, 'h1_status', 'agree') == 'wait':
+            h1_wait_mult = getattr(Config, 'H1_WAIT_POSITION_MULT', 0.5)
+            risk_pct *= h1_wait_mult
             risk_pct = max(0.1, risk_pct)
 
         # ── Limit order entry (at S/R levels) ─────────────────────────
