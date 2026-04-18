@@ -7,8 +7,11 @@
 ## Current Status (2026-04-18)
 
 **All 16 stages complete. Forward testing phase.**
-Challenge frequency optimization complete: MAX_CONFIDENCE_PCT=74,
-SESSION_ACTIVE_HOURS=range(12,23). See Experiments section.
+Regression audit + config revert complete: MAX_CONFIDENCE_PCT=72,
+SESSION_ACTIVE_HOURS=range(13,22). Root cause of 70/2.24 → 87/1.75
+apparent regression = Polygon 2yr sliding-window data drift (not code).
+Chosen on post-audit fresh data: PF 1.75, 87 trades, FN 1-Step PASS 31d,
+per-challenge DD 3.43% (1.75× buffer to 6% FN limit). See Experiments.
 Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
@@ -39,23 +42,26 @@ Awaiting 20 demo trades on IC Markets before FundedNext challenge.
 
 ---
 
-## Latest Backtest (Challenge Freq Optimization 2026-04-18)
+## Latest Backtest (Regression Audit Revert 2026-04-18)
 
 | Metric   | Value  |
 |----------|--------|
-| Trades   | 103    |
-| WR       | 65.0%  |
-| PF       | 1.50   |
-| DD       | 11.67% |
-| Sharpe   | 1.28   |
-| Period   | Apr 2024 - Mar 2026 (2yr Polygon) |
+| Trades   | 87     |
+| WR       | 69.0%  |
+| PF       | 1.75   |
+| DD       | 9.88%  |
+| Sharpe   | 1.49   |
+| Period   | May 2024 - Mar 2026 (fresh 2yr Polygon) |
 
-Prop firm sims: all 8 pass. FN 1-Step: 21d / +11.3% / 2.1% per-challenge DD.
+Prop firm sims: all 8 pass. FN 1-Step: 31d / +10.27% / 3.43% per-challenge DD.
 
-Note: supersedes 2026-04-11 baseline (70 trades, PF 2.24, WR 75.7%).
-Config change: MAX_CONFIDENCE_PCT 72→74, SESSION_ACTIVE_HOURS 13-22→12-23 UTC.
-Per-challenge DD dropped from 4.6% to 2.1% (3× more headroom below 6% limit).
-FN challenge completes in 21d vs 34d. See Experiments section for full sweep.
+Config: MAX_CONFIDENCE_PCT=72, SESSION_ACTIVE_HOURS=range(13,22), H1=agree.
+
+**Supersedes Apr 18 freq-opt (ceil=74+sess 12-22)**. Root cause of prior 70/2.24
+canonical-vs-90/1.51-sweep5 delta = Polygon 2yr window drift (~6-day shift
+between fetches + macro_data.db refresh). Code at HEAD is behaviorally inert
+in agree mode (verified by Exp R1 + R2 producing identical 87/1.75 on fresh
+data at both 56c3cbe and 8c4c32c). See Experiments → Regression Audit.
 
 ---
 
@@ -83,6 +89,7 @@ FN challenge completes in 21d vs 34d. See Experiments section for full sweep.
 | Post-audit ceiling=70       | 36     | 69.4% | 2.00 | 2.93%  | +$1,205 |
 | **Post-audit ceiling=72**   | 70     | 75.7% | 2.24 | 7.44%  | +$4,289 |
 | **Freq opt ceil=74+sess**   | 103    | 65.0% | 1.50 | 11.67% | —       |
+| **Regression audit revert ceil=72** | 87 | 69.0% | 1.75 | 9.88% | +$3,840 |
 
 Stage 16 = deployment only, no metric changes.
 
@@ -201,6 +208,58 @@ ceil=76, ceil=75+session, ceil=75+min_conf=60 all expected ≥ as bad as ceil=75
   21d/2.1% as favorable signal, not guaranteed probability
 
 **Applied:** MAX_CONFIDENCE_PCT 72→74, SESSION_ACTIVE_HOURS range(13,22)→range(12,23)
+
+**Superseded 2026-04-18 by Regression Audit — reverted below.**
+
+### Regression Audit + Revert (2026-04-18 afternoon)
+
+Trigger: `ceil=74+sess` sweep winner showed 103/65.0%/1.50 — but canonical
+`ceil=72, sess 13-22` at `56c3cbe` reported 70/75.7%/2.24/7.44%. 0.73 PF
+delta between nominally identical `ceil=72` configs (canonical vs
+Freq-Opt sweep baseline row 90/1.51) demanded explanation before any
+further optimization.
+
+**Audit:** Code diffs 56c3cbe→HEAD `8c4c32c` (config.py, scoring.py,
+engine.py H1 branches) are all behaviorally inert in `agree` mode —
+sweep5 overrides every changed Config/scoring attr, and the new
+`_analyse_bar` default-else branch matches the pre-change agree path
+exactly. H1-WAIT risk reduction only fires in `noncontradict`.
+
+**Experiments:**
+
+| Exp | Commit | Data                        | Config     | Result                    |
+|-----|--------|-----------------------------|------------|---------------------------|
+| R1  | 56c3cbe| fresh Polygon + 56c3cbe macro | ceil=72   | 87/69.0%/1.75/9.88%, 8/8 PASS |
+| R2  | 8c4c32c| R1 Polygon + R1-post macro  | ceil=72 patched | 87/69.0%/1.75/9.88%, 8/8 PASS |
+
+R1 = R2 exactly (same trade count, WR, PF, DD, Sharpe, FN PASS 31d,
+per-challenge DD 3.43%). Confirms empirically that HEAD code is inert in
+agree mode AND that canonical 70/2.24 numbers are NOT reproducible
+under today's Polygon data at the same code commit.
+
+**Root cause: data drift.** The Polygon 2yr sliding window + macro_data.db
+refresh shifted the bar set enough to move PF from 2.24 to 1.75 at the
+same `ceil=72`. No code regression exists. Canonical is accepted as a
+historical point-in-time snapshot.
+
+**Config selection on fresh data (sweep6, same frozen cache as R2):**
+
+| Candidate                   | Trd | WR    | PF   | DD    | FN days/pnl/dd    | Rule 3 buffer |
+|-----------------------------|-----|-------|------|-------|-------------------|---------------|
+| **ceil=72, sess 13-22**     | 87  | 69.0% | 1.75 | 9.88% | 31d/+10.3%/3.43%  | 1.75× ✓       |
+| ceil=73, sess 13-22         | 87  | 69.0% | 1.75 | 9.88% | 31d/+10.3%/3.43%  | 1.75× ✓       |
+| ceil=74, sess 13-22         | 89  | 68.5% | 1.81 | 9.76% | 32d/+11.0%/4.60%  | 1.30× ✗       |
+| ceil=74, sess 14-22         | 78  | 70.5% | 2.16 | 8.64% | 27d/+10.3%/2.41%  | 2.49× ✓       |
+| ceil=74, min_conf=66, 13-22 | 87  | 70.1% | 2.07 | 6.50% | 32d/+11.0%/4.60%  | 1.30× ✗       |
+
+Selection: ceil=74 variants at sess 13-22 violate the DD-buffer rule
+(per-challenge DD 4.60% vs 6% FN limit = 1.30× < 1.5×). ceil=74 sess
+14-22 passes all rules but drops to 78 trades (below rule-4 threshold).
+ceil=72 and ceil=73 identical under this data; ceil=72 wins on simplicity.
+
+**Applied:** MAX_CONFIDENCE_PCT 74→72, SESSION_ACTIVE_HOURS range(12,23)
+→range(13,22). `H1_FILTER_MODE="agree"` and `H1_WAIT_POSITION_MULT=0.5`
+kept (inert in agree mode; available for future `noncontradict` trials).
 
 ### H1 Agreement Experiment (at ceiling=72)
 
