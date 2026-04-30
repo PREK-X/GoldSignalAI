@@ -2,6 +2,12 @@
 # GoldSignalAI — Ubuntu/Debian VPS setup + systemd service install
 # Usage: bash deploy/setup_vps.sh
 # Tested on: Ubuntu 22.04 LTS (DigitalOcean $6/mo droplet)
+#
+# NOTE: This script is for running ON the VPS itself (after you SSH in).
+# For one-command remote provisioning from your laptop, use:
+#   bash deploy/setup_vps_remote.sh
+# It SSHes in, runs the provisioning, copies your local .env, installs the
+# systemd unit with the correct user/path, and runs main.py --health-check.
 
 set -euo pipefail
 

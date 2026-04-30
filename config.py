@@ -155,6 +155,13 @@ class Config:
     IS_VPS       = bool(os.getenv("VPS_API_KEY", ""))
     IS_WINDOWS   = platform.system() == "Windows"
 
+    # VPS remote-deploy targets (consumed by deploy/setup_vps_remote.sh +
+    # deploy/connect_vps.sh). Empty by default; set in .env to enable one-command
+    # remote deploy.
+    VPS_IP       = os.getenv("VPS_IP", "")
+    VPS_USER     = os.getenv("VPS_USER", "root")
+    SSH_KEY_PATH = os.getenv("SSH_KEY_PATH", "~/.ssh/id_rsa")
+
     # ── Forward Test Mode ─────────────────────────────────────────────────────
     FORWARD_TEST_MODE       = True   # Always True — never ship False
     FORWARD_TEST_MAX_TRADES = 20     # Stop after N forward-test trades on demo
