@@ -247,7 +247,7 @@ class Config:
     # Validated config — 2yr backtest: PF 1.23,
     # DD 10.04%, +17.7% return, 112 trades
     TOTAL_INDICATORS     = 9            # 9 voted indicators (BBands removed — negative accuracy)
-    MIN_CONFIDENCE_PCT   = 65           # Minimum to fire BUY/SELL signal
+    MIN_CONFIDENCE_PCT   = 65           # Minimum to fire BUY/SELL signal (Stage 17 sweep kept C=65 after fresh-data audit)
     MAX_CONFIDENCE_PCT   = 72           # Cap — above this% indicates over-consensus (lagging)
     WAIT_LOWER_BOUND_PCT = 30           # Below this = strong counter-signal
     WAIT_UPPER_BOUND_PCT = 70           # Above this = tradeable signal

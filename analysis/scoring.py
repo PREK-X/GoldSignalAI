@@ -58,6 +58,10 @@ MAX_CONFIDENCE   = Config.MAX_CONFIDENCE_PCT  # 75 — above this = over-consens
 # NY-only 13-22 UTC — London hour 12 UTC flagged at 33.9% WR.
 SESSION_ACTIVE_HOURS = frozenset(range(13, 22))  # 13:00–21:59 UTC (NY session)
 
+# Indicator-count gates (Stage 17: lifted to module scope so sweeps can patch).
+MIN_ACTIVE   = 4
+MIN_DOMINANT = 3
+
 # Bonus/penalty values (added to the raw percentage)
 BONUS_VERY_STRONG_TREND  =  3.0   # ADX > 40
 BONUS_VOLUME_SURGE       =  2.0   # volume ≥ 2× average
@@ -256,8 +260,6 @@ def score_signal(
     # Diagnostic (10-indicator system): 4 dominant → 56.8%, 3 dominant → 44.2%.
     # With 9 indicators (BBands removed), require >= 3 dominant; the session gate
     # does the heavy lifting since London=33.9% and NY=63.3%.
-    MIN_ACTIVE = 4
-    MIN_DOMINANT = 3
     if active_count < MIN_ACTIVE:
         gates.append(
             f"Too few active indicators ({active_count}/{TOTAL_INDICATORS}) "

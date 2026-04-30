@@ -206,22 +206,44 @@ class RegimeDetector:
             self._model = model
 
             # Build volatility-rank mapping: sort states by their mean
-            # realized volatility (column index 1 in feature matrix)
-            vol_means = model.means_[:, 1]  # mean realized_vol per state
-            sorted_indices = np.argsort(vol_means)  # ascending volatility
+            # realized volatility (column index 1 in feature matrix).
+            # Degenerate clusters (<3% training mass) are pushed to CRISIS
+            # so a near-empty lowest-vol bin doesn't claim the TRENDING label.
+            vol_means = model.means_[:, 1]
+            training_states = model.predict(features)
+            state_mass = np.bincount(training_states,
+                                     minlength=N_STATES) / len(training_states)
+            DEGEN_THRESHOLD = 0.03
 
-            # Map: raw hmmlearn state → our volatility-ranked state
+            non_degen = [i for i in range(N_STATES)
+                         if state_mass[i] >= DEGEN_THRESHOLD]
+            degen = [i for i in range(N_STATES)
+                     if state_mass[i] < DEGEN_THRESHOLD]
+            non_degen_sorted = sorted(non_degen, key=lambda i: vol_means[i])
+
             self._vol_sort_map = {}
-            for rank, raw_state in enumerate(sorted_indices):
+            for rank, raw_state in enumerate(non_degen_sorted):
                 self._vol_sort_map[int(raw_state)] = rank
+            for raw_state in degen:
+                self._vol_sort_map[int(raw_state)] = 2  # CRISIS
+            # Pad with rank=2 in case <3 non-degen clusters mapped above
+            for i in range(N_STATES):
+                if i not in self._vol_sort_map:
+                    self._vol_sort_map[i] = 2
 
             self._is_fitted = True
 
+            if degen:
+                logger.warning(
+                    "HMM degenerate clusters (mass<%.0f%%) reassigned to CRISIS: %s",
+                    DEGEN_THRESHOLD * 100, degen,
+                )
             logger.info(
-                "HMM trained on %d H1 bars. State volatility means: %s",
+                "HMM trained on %d H1 bars. State volatility means: %s | mass: %s",
                 len(features),
                 {_LABELS[self._vol_sort_map[i]]: f"{vol_means[i]:.6f}"
                  for i in range(N_STATES)},
+                {i: f"{state_mass[i] * 100:.1f}%" for i in range(N_STATES)},
             )
             return True
 
