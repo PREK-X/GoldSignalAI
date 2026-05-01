@@ -54,6 +54,8 @@ from database.db import initialize_database, save_signal, save_trade, has_recent
 from execution.mt5_bridge import MT5Bridge
 from execution.position_monitor import PositionMonitor
 from state.state_manager import get_state_manager
+from paper_trading.engine import get_paper_engine
+from paper_trading.tracker import get_paper_tracker
 
 
 logger = logging.getLogger("GoldSignalAI")
@@ -66,8 +68,13 @@ ENV: dict = {}
 # SIGNAL HISTORY LOGGER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _log_signal(signal_data: dict) -> None:
-    """Append a signal record to JSON history file + SQLite database."""
+def _log_signal(signal_data: dict) -> Optional[int]:
+    """
+    Append a signal record to JSON history file + SQLite database.
+    Returns the SQLite signals.id for the inserted row, or None on failure.
+    Stage 4 needs the id so paper_trading can link a paper trade back to
+    its source signal.
+    """
     # ── JSON file (existing behaviour) ────────────────────────────────
     try:
         history = []
@@ -88,10 +95,12 @@ def _log_signal(signal_data: dict) -> None:
         logger.warning("Failed to write signal history: %s", exc)
 
     # ── SQLite database ───────────────────────────────────────────────
+    row_id: Optional[int] = None
     try:
-        save_signal(signal_data)
+        row_id = save_signal(signal_data)
     except Exception as exc:
         logger.warning("Failed to save signal to database: %s", exc)
+    return row_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,7 +338,7 @@ def _process_signal(
         logger.info("Non-actionable signal: %s (%s)", sig.direction, sig.reason)
 
     # Stage 3: log once at the end so order_id is captured in the same row.
-    _log_signal({
+    signal_id = _log_signal({
         "timestamp": sig.timestamp.isoformat(),
         "direction": sig.direction,
         "confidence_pct": sig.confidence_pct,
@@ -347,6 +356,18 @@ def _process_signal(
         "forward_test": Config.FORWARD_TEST_MODE,
         "order_id": order_id,
     })
+
+    # Stage 4: open a paper trade for every actionable signal so we always
+    # have an unmocked forward-test record alongside any MT5 execution.
+    if sig.is_actionable and sig.risk is not None:
+        try:
+            get_paper_engine().open_trade(
+                signal=sig,
+                entry_price=sig.entry_price,
+                signal_id=signal_id,
+            )
+        except Exception as exc:
+            logger.warning("paper_engine.open_trade failed: %s", exc)
 
     return signal_count
 
@@ -663,6 +684,17 @@ def _main_loop(shutdown_event: threading.Event) -> None:
                 news_paused=news_paused,
                 pause_reason=pause_reason,
             )
+
+            # ── 5a. Stage 4: paper-trade tracker runs every cycle ─────
+            # Closes any paper trade that hit SL / TP1 / 48-bar TIME.
+            if sig and sig.entry_price > 0:
+                try:
+                    get_paper_tracker().run_cycle({
+                        "close": sig.entry_price,
+                        "timestamp": sig.timestamp,
+                    })
+                except Exception as exc:
+                    logger.warning("paper_tracker.run_cycle failed: %s", exc)
 
             # ── 5b. Duplicate signal check ────────────────────────────
             if sig.is_actionable and has_recent_signal(sig.direction, hours=4.0):

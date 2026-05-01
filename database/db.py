@@ -73,9 +73,32 @@ CREATE TABLE IF NOT EXISTS trades (
 )
 """
 
+_CREATE_PAPER_TRADES = """
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    signal_id       INTEGER,
+    direction       TEXT NOT NULL,
+    entry_price     REAL NOT NULL,
+    sl_price        REAL NOT NULL,
+    tp_price        REAL NOT NULL,
+    tp2_price       REAL,
+    lot_size        REAL NOT NULL DEFAULT 0.01,
+    entry_time      TEXT NOT NULL,
+    exit_price      REAL,
+    exit_time       TEXT,
+    exit_reason     TEXT,
+    pnl_pct         REAL,
+    pnl_dollar      REAL,
+    outcome         TEXT,
+    created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 _CREATE_INDEX = """
 CREATE INDEX IF NOT EXISTS idx_signals_ts ON signals(timestamp);
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_exit ON paper_trades(exit_time);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_outcome ON paper_trades(outcome);
 """
 
 
@@ -97,6 +120,7 @@ def initialize_database() -> bool:
         conn = _get_conn()
         conn.execute(_CREATE_SIGNALS)
         conn.execute(_CREATE_TRADES)
+        conn.execute(_CREATE_PAPER_TRADES)
         conn.executescript(_CREATE_INDEX)
         # Idempotent migrations for existing DBs.
         existing_cols = {row["name"] for row in
@@ -284,3 +308,137 @@ def get_open_trades() -> list[dict]:
     except Exception as exc:
         logger.error("Failed to fetch open trades: %s", exc)
         return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAPER TRADING (Stage 4)
+# ─────────────────────────────────────────────────────────────────────────────
+# Paper trades exit on TP1, SL, or 48-bar TIME exit. tp2_price is recorded
+# observationally only — exit logic never reads it.
+
+def open_paper_trade(
+    signal_id: Optional[int],
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp_price: float,
+    entry_time: str,
+    lot_size: float,
+    tp2_price: Optional[float] = None,
+) -> Optional[int]:
+    """Insert a new open paper trade. Returns row id."""
+    try:
+        conn = _get_conn()
+        cur = conn.execute(
+            """INSERT INTO paper_trades
+               (signal_id, direction, entry_price, sl_price, tp_price, tp2_price,
+                lot_size, entry_time)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (signal_id, direction, entry_price, sl_price, tp_price, tp2_price,
+             lot_size, entry_time),
+        )
+        conn.commit()
+        row_id = cur.lastrowid
+        conn.close()
+        return row_id
+    except Exception as exc:
+        logger.error("Failed to open paper trade: %s", exc)
+        return None
+
+
+def close_paper_trade(
+    trade_id: int,
+    exit_price: float,
+    exit_time: str,
+    exit_reason: str,
+    pnl_pct: float,
+    pnl_dollar: float,
+    outcome: str,
+) -> bool:
+    """Update an open paper trade with exit details. Returns True on success."""
+    try:
+        conn = _get_conn()
+        cur = conn.execute(
+            """UPDATE paper_trades
+               SET exit_price = ?, exit_time = ?, exit_reason = ?,
+                   pnl_pct = ?, pnl_dollar = ?, outcome = ?
+               WHERE id = ? AND exit_time IS NULL""",
+            (exit_price, exit_time, exit_reason, pnl_pct, pnl_dollar, outcome,
+             trade_id),
+        )
+        conn.commit()
+        updated = cur.rowcount > 0
+        conn.close()
+        if not updated:
+            logger.warning("close_paper_trade: id=%d already closed or missing",
+                           trade_id)
+        return updated
+    except Exception as exc:
+        logger.error("Failed to close paper trade %d: %s", trade_id, exc)
+        return False
+
+
+def get_open_paper_trades() -> list[dict]:
+    """Return all paper trades that have not been closed yet."""
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            "SELECT * FROM paper_trades WHERE exit_time IS NULL ORDER BY id ASC"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as exc:
+        logger.error("Failed to fetch open paper trades: %s", exc)
+        return []
+
+
+def get_paper_trade_stats() -> dict:
+    """
+    Aggregate stats over closed paper trades.
+    Returns: trades, wins, losses, win_rate_pct, profit_factor, avg_pnl_dollar,
+             total_pnl_dollar, max_drawdown_dollar.
+    """
+    empty = {
+        "trades": 0, "wins": 0, "losses": 0, "win_rate_pct": 0.0,
+        "profit_factor": 0.0, "avg_pnl_dollar": 0.0, "total_pnl_dollar": 0.0,
+        "max_drawdown_dollar": 0.0,
+    }
+    try:
+        conn = _get_conn()
+        rows = conn.execute(
+            """SELECT pnl_dollar, outcome FROM paper_trades
+               WHERE exit_time IS NOT NULL ORDER BY exit_time ASC"""
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return empty
+        wins = sum(1 for r in rows if r["outcome"] == "WIN")
+        losses = sum(1 for r in rows if r["outcome"] == "LOSS")
+        n = len(rows)
+        gross_win = sum(r["pnl_dollar"] for r in rows
+                        if r["pnl_dollar"] is not None and r["pnl_dollar"] > 0)
+        gross_loss = sum(-r["pnl_dollar"] for r in rows
+                         if r["pnl_dollar"] is not None and r["pnl_dollar"] < 0)
+        total = sum(r["pnl_dollar"] or 0.0 for r in rows)
+        # Cumulative-equity drawdown (dollar units).
+        peak = 0.0
+        cum = 0.0
+        max_dd = 0.0
+        for r in rows:
+            cum += (r["pnl_dollar"] or 0.0)
+            peak = max(peak, cum)
+            max_dd = max(max_dd, peak - cum)
+        return {
+            "trades": n,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": (wins / n * 100.0) if n else 0.0,
+            "profit_factor": (gross_win / gross_loss) if gross_loss > 0 else (
+                float("inf") if gross_win > 0 else 0.0),
+            "avg_pnl_dollar": total / n if n else 0.0,
+            "total_pnl_dollar": total,
+            "max_drawdown_dollar": max_dd,
+        }
+    except Exception as exc:
+        logger.error("get_paper_trade_stats failed: %s", exc)
+        return empty

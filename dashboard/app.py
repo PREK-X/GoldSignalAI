@@ -1584,6 +1584,159 @@ def tab_signal_heatmap(filters: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TAB 7 — PAPER TRADING (Stage 4)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def tab_paper_trading(filters: dict) -> None:
+    """
+    Forward-test paper trades. Mirrors live signals into the paper_trades
+    table; tp2_price is recorded observationally only.
+    """
+    rows = _db_query("SELECT * FROM paper_trades ORDER BY entry_time ASC")
+    if not rows:
+        st.markdown(f"""
+        <div style='background:{C_CARD}; border:1px solid {C_BORDER}; border-radius:8px;
+                    padding:40px; text-align:center; color:{C_MUTED};'>
+          <div style='font-size:32px; margin-bottom:8px;'>💼</div>
+          <div style='font-size:14px;'>No paper trades yet.</div>
+          <div style='font-size:12px; margin-top:4px;'>
+            Paper trades open automatically for every actionable signal.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+        return
+
+    df = pd.DataFrame(rows)
+    df["entry_time"] = pd.to_datetime(df["entry_time"], utc=True, errors="coerce")
+    if "exit_time" in df.columns:
+        df["exit_time"] = pd.to_datetime(df["exit_time"], utc=True, errors="coerce")
+
+    # Optional direction filter from sidebar.
+    if filters.get("direction") and filters["direction"] != "All" \
+            and "direction" in df.columns:
+        df = df[df["direction"] == filters["direction"]]
+
+    closed = df.dropna(subset=["exit_time"]) if "exit_time" in df.columns \
+        else pd.DataFrame()
+
+    # ── Summary metrics ──────────────────────────────────────────────────
+    total_trades = len(df)
+    if not closed.empty and "pnl_dollar" in closed.columns:
+        wins = (closed["outcome"] == "WIN").sum()
+        losses = (closed["outcome"] == "LOSS").sum()
+        denom = max(1, wins + losses)
+        win_rate = wins / denom * 100.0
+        gross_win = closed.loc[closed["pnl_dollar"] > 0, "pnl_dollar"].sum()
+        gross_loss = abs(closed.loc[closed["pnl_dollar"] < 0, "pnl_dollar"].sum())
+        pf = gross_win / gross_loss if gross_loss > 0 else float("inf")
+        total_pnl = closed["pnl_dollar"].sum()
+        avg_pnl = closed["pnl_dollar"].mean()
+
+        eq_sorted = closed.sort_values("exit_time")
+        cum = eq_sorted["pnl_dollar"].cumsum()
+        peak = cum.cummax()
+        max_dd_dollar = float((peak - cum).max())
+    else:
+        wins = losses = 0
+        win_rate = pf = total_pnl = avg_pnl = max_dd_dollar = 0.0
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Trades", f"{total_trades}", f"{len(closed)} closed")
+    c2.metric("Win Rate", f"{win_rate:.1f}%", f"{wins}W / {losses}L")
+    c3.metric("Profit Factor",
+              f"{pf:.2f}" if pf != float("inf") else "∞")
+    c4.metric("Avg PnL", _fmt_usd(avg_pnl))
+    c5.metric("Max Cum DD", _fmt_usd(-max_dd_dollar))
+
+    st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
+
+    # ── Equity curve ─────────────────────────────────────────────────────
+    if not closed.empty and "pnl_dollar" in closed.columns:
+        eq = closed.copy().sort_values("exit_time")
+        eq["cumulative_pnl"] = eq["pnl_dollar"].cumsum()
+        eq["balance"] = filters["account_balance"] + eq["cumulative_pnl"]
+
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=eq["exit_time"],
+            y=eq["balance"],
+            mode="lines",
+            name="Paper Balance",
+            line=dict(color=C_GOLD, width=2),
+            fill="tozeroy",
+            fillcolor="rgba(212,168,67,0.07)",
+            hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b>"
+                          "<br>Balance: $%{y:,.2f}<extra></extra>",
+        ))
+        fig.add_hline(
+            y=filters["account_balance"],
+            line_dash="dot",
+            line_color=C_MUTED,
+            annotation_text="Starting Balance",
+            annotation_font_color=C_MUTED,
+        )
+        fig.update_layout(
+            **PLOTLY_LAYOUT,
+            title=dict(text="Paper-Trade Equity Curve",
+                       font=dict(color=C_GOLD, size=13)),
+            height=280,
+            xaxis=dict(gridcolor=C_BORDER, tickfont=dict(size=10)),
+            yaxis=dict(gridcolor=C_BORDER, tickfont=dict(size=10),
+                       tickprefix="$"),
+            showlegend=False,
+        )
+        st.plotly_chart(fig, use_container_width=True,
+                        config={"displayModeBar": False})
+
+    # ── Paper vs Backtest comparison ─────────────────────────────────────
+    # Backtest baseline: Stage 17 control (D3_C65_agree_S13-21) — see CLAUDE.md.
+    bt = {"trades": 88, "win_rate": 68.2, "pf": 1.66, "max_dd_pct": 3.43}
+    cmp_rows = [
+        ["Trades", total_trades, bt["trades"]],
+        ["Win Rate %", f"{win_rate:.1f}", f"{bt['win_rate']:.1f}"],
+        ["Profit Factor",
+         f"{pf:.2f}" if pf != float("inf") else "∞",
+         f"{bt['pf']:.2f}"],
+    ]
+    cmp_df = pd.DataFrame(cmp_rows, columns=["Metric", "Paper (live)",
+                                              "Backtest baseline"])
+    st.markdown("<div style='height:8px;'></div>", unsafe_allow_html=True)
+    st.markdown(f"<div class='section-header'>Paper vs Backtest baseline</div>",
+                unsafe_allow_html=True)
+    st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+
+    # ── Trade history table ──────────────────────────────────────────────
+    display_cols = [c for c in [
+        "entry_time", "direction", "entry_price", "sl_price", "tp_price",
+        "tp2_price", "exit_price", "exit_reason", "outcome",
+        "pnl_pct", "pnl_dollar", "exit_time",
+    ] if c in df.columns]
+    display_df = df[display_cols].copy().sort_values("entry_time", ascending=False)
+
+    if "pnl_dollar" in display_df.columns:
+        display_df["pnl_dollar"] = display_df["pnl_dollar"].apply(
+            lambda v: f"+${v:.2f}" if pd.notna(v) and v >= 0
+            else (f"-${abs(v):.2f}" if pd.notna(v) else "—")
+        )
+    if "pnl_pct" in display_df.columns:
+        display_df["pnl_pct"] = display_df["pnl_pct"].apply(
+            lambda v: f"{v:+.2f}%" if pd.notna(v) else "—"
+        )
+    if "entry_time" in display_df.columns:
+        display_df["entry_time"] = display_df["entry_time"].dt.strftime(
+            "%Y-%m-%d %H:%M")
+    if "exit_time" in display_df.columns:
+        display_df["exit_time"] = display_df["exit_time"].dt.strftime(
+            "%Y-%m-%d %H:%M")
+
+    st.dataframe(
+        display_df.head(Config.DASHBOARD_MAX_SIGNALS),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MAIN ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1626,6 +1779,7 @@ def run_dashboard() -> None:
         "🏆 Challenge Progress",
         "⚡ Risk Monitor",
         "📊 Signal Heatmap",
+        "💼 Paper Trading",
     ])
 
     with tabs[0]:
@@ -1645,6 +1799,9 @@ def run_dashboard() -> None:
 
     with tabs[5]:
         tab_signal_heatmap(filters)
+
+    with tabs[6]:
+        tab_paper_trading(filters)
 
 
 if __name__ == "__main__":
