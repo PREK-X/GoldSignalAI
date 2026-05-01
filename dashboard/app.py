@@ -1366,6 +1366,66 @@ def tab_risk_monitor() -> None:
 
     st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
 
+    # ── DD Protection (Stage 5) ───────────────────────────────────────────────
+    try:
+        from propfirm.tracker import get_dd_protection_state
+        dd_state = get_dd_protection_state()
+    except Exception:
+        dd_state = {"dd_pct": 0.0, "tier": "NONE", "size_mult": 1.0}
+
+    tier_colors = {
+        "NONE":  C_GREEN,
+        "TIER1": C_YELLOW,
+        "TIER2": C_RED,
+    }
+    tier_color = tier_colors.get(dd_state["tier"], C_MUTED)
+    t1 = Config.DD_PROTECTION_TIER1_PCT
+    t2 = Config.DD_PROTECTION_TIER2_PCT
+    mult = dd_state["size_mult"]
+    mult_color = C_GREEN if mult >= 1.0 else (C_YELLOW if mult > 0.0 else C_RED)
+
+    st.markdown(f"<div class='section-header'>DD Protection</div>",
+                unsafe_allow_html=True)
+    d1, d2, d3 = st.columns(3)
+    with d1:
+        st.markdown(f"""
+        <div style='background:{C_CARD}; border:1px solid {C_BORDER}; border-radius:8px; padding:16px;'>
+          <div style='font-size:10px; color:{C_MUTED}; text-transform:uppercase;
+                      letter-spacing:0.1em; margin-bottom:8px;'>Trailing DD</div>
+          <div style='font-size:32px; font-weight:700; color:{tier_color};
+                      font-family:JetBrains Mono;'>{dd_state["dd_pct"]:.2f}%</div>
+          <div style='font-size:11px; color:{C_MUTED}; margin-top:4px;'>
+            T1: {t1:.1f}% · T2: {t2:.1f}%
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with d2:
+        st.markdown(f"""
+        <div style='background:{C_CARD}; border:1px solid {C_BORDER}; border-radius:8px; padding:16px;'>
+          <div style='font-size:10px; color:{C_MUTED}; text-transform:uppercase;
+                      letter-spacing:0.1em; margin-bottom:8px;'>Active Tier</div>
+          <div style='font-size:24px; font-weight:700; color:{tier_color};
+                      font-family:JetBrains Mono;'>{dd_state["tier"]}</div>
+          <div style='font-size:11px; color:{C_MUTED}; margin-top:4px;'>
+            v1 — no hysteresis (see CLAUDE.md gaps)
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with d3:
+        st.markdown(f"""
+        <div style='background:{C_CARD}; border:1px solid {C_BORDER}; border-radius:8px; padding:16px;'>
+          <div style='font-size:10px; color:{C_MUTED}; text-transform:uppercase;
+                      letter-spacing:0.1em; margin-bottom:8px;'>Risk Multiplier</div>
+          <div style='font-size:32px; font-weight:700; color:{mult_color};
+                      font-family:JetBrains Mono;'>{mult:.1f}×</div>
+          <div style='font-size:11px; color:{C_MUTED}; margin-top:4px;'>
+            Applied to suggested_lot
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.markdown("<div style='height:20px;'></div>", unsafe_allow_html=True)
+
     # ── News filter status ────────────────────────────────────────────────────
     st.markdown(f"<div class='section-header'>News & Volatility Filter</div>", unsafe_allow_html=True)
     n1, n2, n3 = st.columns(3)

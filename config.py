@@ -368,6 +368,18 @@ class Config:
     MT5_RETRY_DELAY_S   = 2                 # Seconds between retries
     MT5_EXECUTION_ENABLED = False           # True when ready to execute live
 
+    # ── DD Protection (Stage 5) ───────────────────────────────────────────────
+    # Trailing peak-to-trough DD tiers, evaluated against the active
+    # ChallengeTracker (state/challenge_state.json). T1 caps risk to 0.5x;
+    # T2 blocks new entries entirely.
+    DD_PROTECTION_ENABLED   = True
+    DD_PROTECTION_TIER1_PCT = 3.0
+    DD_PROTECTION_TIER2_PCT = 4.5
+    # Inert in v1 — kept as the recovery threshold for the hysteresis fix
+    # tracked in CLAUDE.md "Integration Gaps". Without hysteresis the
+    # multiplier thrashes near 3.0% / 4.5%.
+    DD_PROTECTION_RESET_PCT = 1.5
+
     # ── News API ──────────────────────────────────────────────────────────────
     NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
     NEWS_API_URL = "https://newsapi.org/v2/everything"

@@ -149,6 +149,7 @@ dominant cluster. Logged as warning when triggered.
 | File               | Gap                                    | Priority |
 |--------------------|----------------------------------------|----------|
 | analysis/scoring.py| MIN_ACTIVE, MIN_DOMINANT, SESSION_HOURS at module scope (Stage 17) but still not in config.py | Low — move for Stage 9 multi-asset |
+| signals/meta_decision.py | DD protection lacks hysteresis — multiplier thrashes near 3.0% / 4.5% thresholds (Stage 5 v1). Fix: persist last-applied tier in state_manager, clear only when DD < `DD_PROTECTION_RESET_PCT` (1.5%). | Medium — monitor live for thrash before fixing |
 
 signals/generator.py MetaDecision gap: **FIXED** (Stage 11).
 

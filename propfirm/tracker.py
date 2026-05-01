@@ -606,3 +606,53 @@ class ChallengeTracker:
             )
         except Exception as exc:
             logger.error("ChallengeTracker load failed: %s", exc)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DD PROTECTION (Stage 5)
+# ─────────────────────────────────────────────────────────────────────────────
+# Stateless helpers that read the persisted ChallengeTracker JSON and report
+# the trailing peak-to-trough drawdown. MetaDecision consults these every
+# cycle to decide whether to cap or block sizing.
+#
+# Hysteresis is not yet wired (see CLAUDE.md "Integration Gaps"); v1 just
+# compares raw DD against TIER1 / TIER2 thresholds.
+
+def get_current_dd_pct() -> float:
+    """
+    Trailing peak-to-trough DD as % of starting balance, read from
+    Config.CHALLENGE_STATE_FILE. Returns 0.0 if the file is missing,
+    malformed, or starting balance is non-positive.
+    """
+    path = Config.CHALLENGE_STATE_FILE
+    if not os.path.isfile(path):
+        return 0.0
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except Exception as exc:
+        logger.warning("get_current_dd_pct: failed to read %s: %s", path, exc)
+        return 0.0
+
+    initial = float(data.get("initial_balance", 0) or 0)
+    peak = float(data.get("peak_balance", 0) or 0)
+    current = float(data.get("current_balance", 0) or 0)
+    if initial <= 0:
+        return 0.0
+    return max(0.0, (peak - current) / initial * 100.0)
+
+
+def get_dd_protection_state() -> dict:
+    """
+    Classify current DD against the configured tiers. Returns:
+        {"dd_pct": float, "tier": "NONE"|"TIER1"|"TIER2",
+         "size_mult": 1.0|0.5|0.0}
+    """
+    dd = get_current_dd_pct()
+    if not Config.DD_PROTECTION_ENABLED:
+        return {"dd_pct": dd, "tier": "NONE", "size_mult": 1.0}
+    if dd >= Config.DD_PROTECTION_TIER2_PCT:
+        return {"dd_pct": dd, "tier": "TIER2", "size_mult": 0.0}
+    if dd >= Config.DD_PROTECTION_TIER1_PCT:
+        return {"dd_pct": dd, "tier": "TIER1", "size_mult": 0.5}
+    return {"dd_pct": dd, "tier": "NONE", "size_mult": 1.0}

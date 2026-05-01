@@ -194,6 +194,34 @@ class MetaDecision:
             except Exception as exc:
                 logger.warning("Rule 5 (news filter) failed (continuing): %s", exc)
 
+        # ── Rule 6: DD Protection (Stage 5) ─────────────────────────────
+        # Trailing peak-to-trough DD on the active ChallengeTracker.
+        # TIER2 blocks new entries. TIER1 caps sizing at 0.5x.
+        # Hysteresis is intentionally absent in v1 — see CLAUDE.md
+        # "Integration Gaps" for the thrash-near-threshold gap.
+        if Config.DD_PROTECTION_ENABLED:
+            try:
+                from propfirm.tracker import get_current_dd_pct
+                dd_pct = get_current_dd_pct()
+            except Exception as exc:
+                logger.warning("Rule 6 (DD protection) read failed: %s", exc)
+                dd_pct = 0.0
+
+            if dd_pct >= Config.DD_PROTECTION_TIER2_PCT:
+                return MetaResult(
+                    allowed=False,
+                    block_reason=(
+                        f"DD_PROTECTION_T2: trailing DD {dd_pct:.2f}% "
+                        f">= {Config.DD_PROTECTION_TIER2_PCT}%"
+                    ),
+                    position_size_mult=0.0,
+                    adjusted_confidence=adjusted_conf,
+                    lgbm_prob=lgbm_prob,
+                    hmm_state=hmm_state,
+                )
+            if dd_pct >= Config.DD_PROTECTION_TIER1_PCT:
+                position_mult = min(position_mult, 0.5)
+
         # ── All rules passed ─────────────────────────────────────────────
         return MetaResult(
             allowed=True,
