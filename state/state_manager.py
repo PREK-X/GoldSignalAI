@@ -32,6 +32,7 @@ class StateManager:
         session_date                -- "YYYY-MM-DD" of the current session
         last_signal_direction       -- most recent emitted signal direction
         last_signal_time            -- ISO timestamp of most recent signal
+        open_order_ids              -- MT5 tickets currently open (Stage 3)
     """
 
     def __init__(self, state_file: str = STATE_FILE):
@@ -40,6 +41,7 @@ class StateManager:
         self.session_date: str = ""
         self.last_signal_direction: str = ""
         self.last_signal_time: str = ""
+        self.open_order_ids: list[int] = []
         self._load()
 
     # ── Session loss tracking ─────────────────────────────────────────────
@@ -98,6 +100,26 @@ class StateManager:
         self.last_signal_time = signal_time.isoformat()
         self._save()
 
+    # ── Open order tracking (Stage 3) ─────────────────────────────────────
+
+    def add_order(self, order_id: int) -> None:
+        """Append an MT5 ticket to the open-orders list and persist."""
+        if order_id is None or order_id <= 0:
+            return
+        if order_id not in self.open_order_ids:
+            self.open_order_ids.append(int(order_id))
+            self._save()
+
+    def remove_order(self, order_id: int) -> None:
+        """Drop an MT5 ticket from the open-orders list and persist."""
+        if order_id is None:
+            return
+        try:
+            self.open_order_ids.remove(int(order_id))
+        except ValueError:
+            return
+        self._save()
+
     # ── Persistence ───────────────────────────────────────────────────────
 
     def _load(self) -> None:
@@ -110,6 +132,8 @@ class StateManager:
             self.session_date = data.get("session_date", "")
             self.last_signal_direction = data.get("last_signal_direction", "")
             self.last_signal_time = data.get("last_signal_time", "")
+            raw_orders = data.get("open_order_ids", [])
+            self.open_order_ids = [int(x) for x in raw_orders if x is not None]
         except Exception as exc:
             logger.warning("Failed to load state from %s: %s", self._path, exc)
 
@@ -121,8 +145,30 @@ class StateManager:
                 "session_date": self.session_date,
                 "last_signal_direction": self.last_signal_direction,
                 "last_signal_time": self.last_signal_time,
+                "open_order_ids": list(self.open_order_ids),
             }
             with open(self._path, "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as exc:
             logger.warning("Failed to save state to %s: %s", self._path, exc)
+
+
+# ── Module-level singleton (Stage 3) ─────────────────────────────────────────
+# Live bot + signal generator + position monitor share one instance backed by
+# state/state.json so updates are visible across modules.
+
+_INSTANCE: Optional["StateManager"] = None
+
+
+def get_state_manager() -> "StateManager":
+    """Return the process-wide StateManager singleton (creates it on first call)."""
+    global _INSTANCE
+    if _INSTANCE is None:
+        _INSTANCE = StateManager()
+    return _INSTANCE
+
+
+def reset_state_manager_for_tests() -> None:
+    """Test helper: drop the singleton so a clean instance is built next call."""
+    global _INSTANCE
+    _INSTANCE = None

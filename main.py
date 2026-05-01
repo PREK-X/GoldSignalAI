@@ -53,6 +53,7 @@ from infrastructure.environment import detect_environment
 from database.db import initialize_database, save_signal, save_trade, has_recent_signal, count_forward_test_trades, DB_PATH
 from execution.mt5_bridge import MT5Bridge
 from execution.position_monitor import PositionMonitor
+from state.state_manager import get_state_manager
 
 
 logger = logging.getLogger("GoldSignalAI")
@@ -229,24 +230,7 @@ def _process_signal(
     print(formatted)
     print()
 
-    # Log every signal (including WAIT) to history
-    _log_signal({
-        "timestamp": sig.timestamp.isoformat(),
-        "direction": sig.direction,
-        "confidence_pct": sig.confidence_pct,
-        "entry_price": sig.entry_price,
-        "stop_loss": sig.risk.stop_loss if sig.risk else None,
-        "tp1": sig.risk.tp1_price if sig.risk else None,
-        "tp2": sig.risk.tp2_price if sig.risk else None,
-        "sl_pips": sig.risk.sl_pips if sig.risk else None,
-        "lot_size": sig.risk.suggested_lot if sig.risk else None,
-        "bullish_count": sig.bullish_count,
-        "bearish_count": sig.bearish_count,
-        "ml_confirms": sig.ml_confirms,
-        "reason": sig.reason,
-        "is_paused": sig.is_paused,
-        "forward_test": Config.FORWARD_TEST_MODE,
-    })
+    order_id: Optional[int] = None  # Stage 3: MT5 ticket if place_order succeeds
 
     # Only send alerts for actionable signals
     if sig.is_actionable:
@@ -291,11 +275,17 @@ def _process_signal(
                     entry_price=sig.entry_price,
                 )
                 if order_result.success:
+                    order_id = order_result.ticket
                     logger.info(
                         "MT5 order placed: ticket=%d %s %.2f lots @ %.2f",
                         order_result.ticket, sig.direction,
                         lot_size, order_result.fill_price,
                     )
+                    # Stage 3: persist ticket so PositionMonitor can clean up later.
+                    try:
+                        get_state_manager().add_order(order_id)
+                    except Exception as exc:
+                        logger.warning("state_manager.add_order failed: %s", exc)
                 else:
                     logger.warning("MT5 order failed: %s", order_result.message)
             except Exception as exc:
@@ -337,6 +327,26 @@ def _process_signal(
 
     else:
         logger.info("Non-actionable signal: %s (%s)", sig.direction, sig.reason)
+
+    # Stage 3: log once at the end so order_id is captured in the same row.
+    _log_signal({
+        "timestamp": sig.timestamp.isoformat(),
+        "direction": sig.direction,
+        "confidence_pct": sig.confidence_pct,
+        "entry_price": sig.entry_price,
+        "stop_loss": sig.risk.stop_loss if sig.risk else None,
+        "tp1": sig.risk.tp1_price if sig.risk else None,
+        "tp2": sig.risk.tp2_price if sig.risk else None,
+        "sl_pips": sig.risk.sl_pips if sig.risk else None,
+        "lot_size": sig.risk.suggested_lot if sig.risk else None,
+        "bullish_count": sig.bullish_count,
+        "bearish_count": sig.bearish_count,
+        "ml_confirms": sig.ml_confirms,
+        "reason": sig.reason,
+        "is_paused": sig.is_paused,
+        "forward_test": Config.FORWARD_TEST_MODE,
+        "order_id": order_id,
+    })
 
     return signal_count
 
@@ -531,7 +541,13 @@ def _main_loop(shutdown_event: threading.Event) -> None:
         discord_notify = discord_send
     except Exception:
         pass
-    pos_monitor = PositionMonitor(mt5_bridge, notifier=discord_notify)
+    # Stage 3: drop ticket from state_manager.open_order_ids on auto-close.
+    state_mgr = get_state_manager()
+    pos_monitor = PositionMonitor(
+        mt5_bridge,
+        notifier=discord_notify,
+        on_close=lambda ticket, reason: state_mgr.remove_order(ticket),
+    )
 
     logger.info("Signal loop started. Waiting for next M15 candle close...")
 

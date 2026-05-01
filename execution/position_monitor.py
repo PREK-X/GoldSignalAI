@@ -12,7 +12,7 @@ Responsibilities (checked every 15 minutes):
 
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Callable, Optional
 
 from config import Config
 from execution.mt5_bridge import MT5Bridge, PositionInfo
@@ -33,9 +33,17 @@ class PositionMonitor:
     Call check_and_manage_positions() on every signal loop iteration.
     """
 
-    def __init__(self, bridge: MT5Bridge, notifier=None):
+    def __init__(
+        self,
+        bridge: MT5Bridge,
+        notifier=None,
+        on_close: Optional[Callable[[int, str], None]] = None,
+    ):
         self._bridge = bridge
         self._notifier = notifier  # DiscordNotifier or None
+        # Stage 3: invoked with (ticket, reason) after a successful auto-close
+        # so callers can drop the ticket from state_manager.open_order_ids.
+        self._on_close = on_close
 
     def check_and_manage_positions(
         self,
@@ -146,6 +154,12 @@ class PositionMonitor:
                 reason, pos.ticket, pos.direction, pos.symbol,
                 current_price, pos.open_price,
             )
+            if self._on_close is not None:
+                try:
+                    self._on_close(pos.ticket, reason)
+                except Exception as exc:
+                    logger.warning("on_close callback failed for ticket %d: %s",
+                                   pos.ticket, exc)
         else:
             logger.warning(
                 "Failed to close position [%s]: ticket=%d — %s",

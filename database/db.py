@@ -41,12 +41,17 @@ CREATE TABLE IF NOT EXISTS signals (
     ml_confirms     INTEGER,
     reason          TEXT,
     is_paused       INTEGER DEFAULT 0,
-    forward_test    INTEGER DEFAULT 0
+    forward_test    INTEGER DEFAULT 0,
+    order_id        INTEGER DEFAULT NULL
 )
 """
 
 _MIGRATE_SIGNALS_FORWARD_TEST = """
 ALTER TABLE signals ADD COLUMN forward_test INTEGER DEFAULT 0
+"""
+
+_MIGRATE_SIGNALS_ORDER_ID = """
+ALTER TABLE signals ADD COLUMN order_id INTEGER DEFAULT NULL
 """
 
 _CREATE_TRADES = """
@@ -93,12 +98,19 @@ def initialize_database() -> bool:
         conn.execute(_CREATE_SIGNALS)
         conn.execute(_CREATE_TRADES)
         conn.executescript(_CREATE_INDEX)
-        # Migration: add forward_test column if missing (existing DBs)
-        try:
-            conn.execute(_MIGRATE_SIGNALS_FORWARD_TEST)
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
+        # Idempotent migrations for existing DBs.
+        existing_cols = {row["name"] for row in
+                         conn.execute("PRAGMA table_info(signals)").fetchall()}
+        if "forward_test" not in existing_cols:
+            try:
+                conn.execute(_MIGRATE_SIGNALS_FORWARD_TEST)
+            except Exception:
+                pass
+        if "order_id" not in existing_cols:
+            try:
+                conn.execute(_MIGRATE_SIGNALS_ORDER_ID)
+            except Exception:
+                pass
         conn.commit()
         conn.close()
         logger.info("Database initialized at %s", DB_PATH)
@@ -113,7 +125,8 @@ def save_signal(signal_data: dict) -> Optional[int]:
     Insert a signal record. Returns the row ID, or None on failure.
 
     Expected keys: timestamp, direction, confidence_pct, entry_price,
-    bullish_count, bearish_count, ml_confirms, reason, is_paused, forward_test
+    bullish_count, bearish_count, ml_confirms, reason, is_paused, forward_test,
+    order_id (Stage 3: MT5 ticket from place_order on success, else None)
     """
     try:
         conn = _get_conn()
@@ -121,8 +134,8 @@ def save_signal(signal_data: dict) -> Optional[int]:
             """INSERT INTO signals
                (timestamp, symbol, direction, confidence, entry_price,
                 bullish_count, bearish_count, ml_confirms, reason, is_paused,
-                forward_test)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                forward_test, order_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 signal_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
                 signal_data.get("symbol", Config.SYMBOL),
@@ -135,6 +148,7 @@ def save_signal(signal_data: dict) -> Optional[int]:
                 signal_data.get("reason", ""),
                 1 if signal_data.get("is_paused") else 0,
                 1 if signal_data.get("forward_test") else 0,
+                signal_data.get("order_id"),
             ),
         )
         conn.commit()

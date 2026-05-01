@@ -30,13 +30,12 @@ from ml.predictor import predict, MLPrediction, is_model_ready
 from ml.predictor import predict_lgbm, LGBMPrediction, is_lgbm_ready
 from signals.meta_decision import MetaDecision, MetaResult
 from signals.risk_manager import calculate_risk, RiskParameters
-from state.state_manager import StateManager
+from state.state_manager import StateManager, get_state_manager
 
 logger = logging.getLogger(__name__)
 
 # ── Module-level singletons (initialised once, reused across calls) ──────
 _meta_decision: Optional[MetaDecision] = None
-_state_manager: Optional[StateManager] = None
 
 
 def _get_meta_decision() -> MetaDecision:
@@ -47,10 +46,8 @@ def _get_meta_decision() -> MetaDecision:
 
 
 def _get_state_manager() -> StateManager:
-    global _state_manager
-    if _state_manager is None:
-        _state_manager = StateManager()
-    return _state_manager
+    """Return shared process-wide StateManager (Stage 3)."""
+    return get_state_manager()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
