@@ -4,22 +4,27 @@
 
 ---
 
-## Current Status (2026-04-30)
+## Current Status (2026-05-01)
 
-**Stage 17 frequency sweep complete. Config kept at control after fresh-data audit.**
-25-row sweep on Apr-19 cache found 0/25 rows pass all 4 hard gates (trades≥500,
-PF≥1.50, WR≥60%, FN buffer≥1.30×, 8/8 firms). Top-3 Pareto led by D3_C58_agree_S13-21
-(125 trd, PF 1.50, buf 4.80×). User picked relax-trades branch; fresh-data verify
-on Apr-30 showed PF dropped 1.50 → 1.29 (data drift). User reverted to D3_C65 control.
-HMM degenerate-cluster fix shipped (regime_filter.py): mass-<3% clusters → CRISIS
-to prevent label flip. See CLAUDE.md "Stage 17 frequency sweep" for full table.
+**Stage 17 plan complete — all 6 sub-stages shipped.**
+Frequency sweep (Stage 1) kept at control config after fresh-data audit. VPS
+deploy automation, MT5 auto-execution wiring, paper-trading forward test, and
+dynamic DD protection are all live. See CLAUDE.md "Stage 17 — Completion
+Summary" for the commit table and config delta.
 
-**Latest fresh-data verify (Apr-30 with HMM fix, control config):**
-87 trd / WR 66.7% / PF 1.56 / DD 9.83% / per-challenge DD 2.16% / buffer 2.78× /
-8/8 firms PASS. FN-1Step PASS 30d / +11.56% / 2.16% DD.
+**Stage 6 verification (2026-05-01):**
+67 trd / WR 74.6% / PF 1.99 / DD 9.09% / per-challenge DD 1.25% / buffer 4.80× /
+8/8 firms PASS. FN 1-Step PASS 23d / +10.16% / 1.25% DD.
 
-**Stages 2-6 of plan optimized-puzzling-wind (VPS / MT5 / paper trading / DD
-protection / integration) pending.**
+**System state:**
+- HMM degenerate-cluster fix shipped (regime_filter.py): mass-<3% clusters →
+  CRISIS to prevent label flip.
+- MT5 execution Linux-safe — bridge returns simulated tickets when
+  `MT5_EXECUTION_ENABLED=True` and platform is "simulation".
+- Paper-trading runs every M15 cycle alongside MT5 — forward-test parity check
+  for live behaviour.
+- DD protection v1: TIER1 (3.0%) caps sizing to 0.5×, TIER2 (4.5%) blocks new
+  entries. Hysteresis (`DD_PROTECTION_RESET_PCT`) tracked as a known gap.
 
 ---
 
@@ -405,6 +410,7 @@ experiment — the backtest now honours the flag.
 | 14    | Dashboard              | 2026-04-03 | Bloomberg theme, 6 tabs        |
 | 15    | Final Testing          | 2026-04-05 | RANGING block + FN ceiling     |
 | 16    | Deployment             | 2026-04-05 | Env detect, forward test mode  |
+| 17    | Frequency+VPS+Exec+Paper+DD | 2026-05-01 | All 6 sub-stages — see CLAUDE.md |
 
 ---
 

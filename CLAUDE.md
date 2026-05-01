@@ -144,6 +144,62 @@ dominant cluster. Logged as warning when triggered.
 
 ---
 
+## Stage 17 — Completion Summary (2026-05-01)
+
+All 6 sub-stages complete. Final commits:
+
+| Stage | Title                                            | Commit    |
+|-------|--------------------------------------------------|-----------|
+| 1     | Frequency sweep + HMM stability fix              | `d2c8770` |
+| 2     | VPS deployment system                            | `bf38328` |
+| 3     | MT5 auto-execution wiring + order tracking       | `1bb3463` |
+| 4     | Paper trading forward-test engine                | `ed2c054` |
+| 5     | Dynamic DD protection (v1, no hysteresis)        | `ab6a203` |
+| 6     | Integration validation                           | (this)    |
+
+**New config constants (Stage 17):**
+
+| Name                       | Default | Purpose                                  |
+|----------------------------|---------|------------------------------------------|
+| `VPS_IP`                   | `""`    | Stage 2 — remote deploy target           |
+| `VPS_USER`                 | `root`  | Stage 2 — SSH user                       |
+| `SSH_KEY_PATH`             | `~/.ssh/id_rsa` | Stage 2 — SSH key                |
+| `DD_PROTECTION_ENABLED`    | `True`  | Stage 5 — master switch                  |
+| `DD_PROTECTION_TIER1_PCT`  | `3.0`   | Stage 5 — DD% at which sizing → 0.5x     |
+| `DD_PROTECTION_TIER2_PCT`  | `4.5`   | Stage 5 — DD% at which entries blocked   |
+| `DD_PROTECTION_RESET_PCT`  | `1.5`   | Stage 5 — inert v1 (hysteresis target)   |
+
+**Paper-trading system (Stage 4):**
+- `paper_trading/engine.py::PaperTradingEngine` — full-lot TP1/SL/48-bar TIME exits;
+  PnL mirrors `backtest/engine.py` (`pnl_pips = direction_sign × (exit-entry) / PIP_SIZE`;
+  `pnl_dollar = pnl_pips × GOLD_PIP_VALUE × lot_size`).
+- `paper_trading/tracker.py::PaperTradingTracker.run_cycle()` — runs every M15 cycle
+  before signal generation; closes any trade hitting SL / TP1 / 48-bar TIME.
+- `paper_trades` SQLite table (id, signal_id, direction, entry/sl/tp/tp2 prices,
+  lot_size, entry/exit times, pnl_pct, pnl_dollar, outcome). `tp2_price` is
+  observational only — no exit, sizing, or risk reads it in v1.
+- Dashboard 7th tab `💼 Paper Trading` (5-metric row, equity curve, paper-vs-backtest).
+
+**VPS deploy (Stage 2):**
+- `deploy/setup_vps_remote.sh` — one-command deploy: SSH to host, install Python,
+  clone repo (token-prompted), pip install, scp .env, install systemd unit, run
+  health-check.
+- `deploy/connect_vps.sh` — quick SSH+log-tail.
+- `infrastructure/environment.py::detect_vps()` — headless-Linux heuristic (no `$DISPLAY`).
+- Required `.env` keys: `VPS_IP`, `VPS_USER`, `SSH_KEY_PATH`.
+
+**Stage 6 verification (2026-05-01):**
+- `main.py --health-check` → exit 0 (4 config warnings)
+- pytest 160/160 (DST test deselected — pre-existing)
+- backtest 8/8 firms PASS, FN 1-Step 23d / +10.16% / 1.25% per-challenge DD (4.80× buffer)
+- Dashboard 7 tabs callable — `tab_paper_trading` added, all six prior tabs intact
+- Paper-trade smoke: BUY @ 2300, SL 2290, TP 2320, lot 0.10 → TP exit at 2325 logs
+  WIN, +200 pips, +$200. Cleanup confirmed.
+- MT5 simulation: `MT5Bridge.platform == "simulation"` returns `success=True` with
+  simulated ticket (Stage 11 behaviour) — no crash with `MT5_EXECUTION_ENABLED=True`.
+
+---
+
 ## Integration Gaps
 
 | File               | Gap                                    | Priority |
