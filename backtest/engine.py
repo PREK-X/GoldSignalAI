@@ -306,6 +306,10 @@ class BacktestResult:
     # Stage 10: news/volatility filter stats
     meta_blocked_news: int = 0
 
+    # Stage 5 (Stage 17): DD protection — backtest-internal tier wiring
+    dd_protection_t1_count: int = 0
+    dd_protection_t2_blocked: int = 0
+
     def summary(self) -> str:
         """Human-readable summary string."""
         lines = [
@@ -367,6 +371,11 @@ class BacktestResult:
             lines.append(f"   Blocked by news/volatility:  {self.meta_blocked_news}")
             lines.append(f"   Boosted by HMM+LGBM agree:  {self.meta_boosted}")
             lines.append(f"   Avg position size mult:      {self.meta_avg_position_mult:.2f}")
+        if self.dd_protection_t1_count or self.dd_protection_t2_blocked:
+            lines.append(f"{'─' * 50}")
+            lines.append(f" DD Protection (Stage 5):")
+            lines.append(f"   TIER1 (0.5x sizing) hits:  {self.dd_protection_t1_count}")
+            lines.append(f"   TIER2 (block) skips:        {self.dd_protection_t2_blocked}")
         lines.append(f"{'═' * 50}")
         return "\n".join(line for line in lines if line)
 
@@ -1466,6 +1475,12 @@ def run_backtest(
     meta_blocked_news = 0
     meta_reduced_news = 0  # signals allowed but size reduced by news filter
 
+    # Stage 5 (Stage 17): DD protection counters — replicates meta_decision Rule 6
+    # using the backtest-internal trailing DD (state/challenge_state.json doesn't
+    # update mid-simulation, so meta_decision Rule 6 is inert in backtest).
+    dd_protection_t1_count = 0
+    dd_protection_t2_blocked = 0
+
     # Session consecutive loss tracking (Rule 4)
     session_consecutive_losses = 0
     current_session_day: Optional[str] = None  # track which day's session we're in
@@ -1705,6 +1720,21 @@ def run_backtest(
             pass
         meta_position_mults.append(meta_result.position_size_mult)
 
+        # ── Stage 5 (Stage 17) DD Protection ──────────────────────────
+        # Mirrors signals/meta_decision.py Rule 6, but reads
+        # `total_dd_pct` (computed each bar from in-simulation balance)
+        # instead of state/challenge_state.json which doesn't update
+        # during a backtest. TIER2 blocks new entries; TIER1 caps the
+        # position-size multiplier at 0.5×.
+        dd_protection_mult = 1.0
+        if Config.DD_PROTECTION_ENABLED:
+            if total_dd_pct >= Config.DD_PROTECTION_TIER2_PCT:
+                dd_protection_t2_blocked += 1
+                continue
+            if total_dd_pct >= Config.DD_PROTECTION_TIER1_PCT:
+                dd_protection_mult = 0.5
+                dd_protection_t1_count += 1
+
         # ── Circuit breaker gate ──────────────────────────────────────
         cb_state = cb.get_circuit_state(daily_pnl_pct, total_dd_pct)
         if not cb.is_signal_allowed(daily_pnl_pct, total_dd_pct, confidence):
@@ -1751,6 +1781,11 @@ def run_backtest(
         # Apply meta-decision position size multiplier (RANGING = 0.5x)
         if meta_result.position_size_mult < 1.0:
             risk_pct *= meta_result.position_size_mult
+            risk_pct = max(0.1, risk_pct)
+
+        # Apply DD protection TIER1 multiplier (Stage 5 / Stage 17)
+        if dd_protection_mult < 1.0:
+            risk_pct *= dd_protection_mult
             risk_pct = max(0.1, risk_pct)
 
         # Apply H1 non-contradiction position size reduction
@@ -1881,6 +1916,8 @@ def run_backtest(
     result.meta_boosted = meta_boosted
     result.meta_avg_position_mult = float(np.mean(meta_position_mults)) if meta_position_mults else 0.0
     result.meta_blocked_news = meta_blocked_news
+    result.dd_protection_t1_count = dd_protection_t1_count
+    result.dd_protection_t2_blocked = dd_protection_t2_blocked
 
     # ── Step 5: Prop firm simulations ──────────────────────────────────
     if cfg.simulate_prop_firm:

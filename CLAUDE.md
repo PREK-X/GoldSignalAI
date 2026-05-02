@@ -200,6 +200,37 @@ All 6 sub-stages complete. Final commits:
 
 ---
 
+## Stage 5 follow-up: DD protection wired into backtest engine (2026-05-02)
+
+`backtest/engine.py` now mirrors `signals/meta_decision.py` Rule 6 inside the
+simulation loop. Reads the backtest-internal `total_dd_pct` (already computed
+each bar from in-simulation balance), since `state/challenge_state.json`
+doesn't update mid-backtest. TIER2 → `continue` (skip entry); TIER1 → multiply
+`risk_pct` by 0.5. New counters surfaced in `BacktestResult`:
+`dd_protection_t1_count`, `dd_protection_t2_blocked`. New summary block "DD
+Protection (Stage 5)".
+
+**2yr backtest comparison (2026-05-02, fresh data):**
+
+| Metric        | Stage 6 baseline | DD-prot wired | Δ        |
+|---------------|------------------|----------------|----------|
+| Trades        | 67               | 60             | -7       |
+| Win Rate      | 74.6%            | 78.3%          | +3.7 pp  |
+| Profit Factor | 1.99             | 2.71           | +0.72    |
+| Max DD        | 9.09%            | 3.72%          | -5.37 pp |
+| Sharpe        | 1.61             | 2.19           | +0.58    |
+| Total PnL     | +$3760.85        | +$4286.57      | +$525.72 |
+| TIER1 hits    | —                | 5              | new      |
+| TIER2 blocks  | —                | 12             | new      |
+| 8/8 firms     | PASS             | PASS           | unchanged|
+
+Single-challenge sims still PASS at 1.25% per-challenge DD — challenges
+complete inside 23 days, before cumulative 2yr DD spikes that trigger
+TIER1/TIER2. The 12 TIER2-blocked entries during 2yr peak-DD periods were
+mostly losers (else DD wouldn't have spiked) — net +$525 PnL with half the DD.
+
+---
+
 ## Integration Gaps
 
 | File               | Gap                                    | Priority |
